@@ -1,25 +1,35 @@
-# Dependencies
+# ── Node ──────────────────────────────────────────────────────
 node_modules/
-
-# Build output
 dist/
 
-# Environment — NEVER commit .env (contains secrets)
+# ── Environment — NEVER commit (contains secrets) ─────────────
 .env
 .env.local
 .env.*.local
 
-# Logs
+# ── Python agent ──────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+agent/__pycache__/
+agent/tools/__pycache__/
+agent/voice/__pycache__/
+agent/credentials/
+agent/cache/
+# Note: agent/config.yaml is committed — it has NO secrets (all secrets come from ../.env)
+
+# ── Logs ──────────────────────────────────────────────────────
 *.log
 npm-debug.log*
 
-# OS
+# ── OS ────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# Editor
+# ── Editor ────────────────────────────────────────────────────
 .vscode/
 .idea/
 
-# Misc
+# ── Misc ──────────────────────────────────────────────────────
 run.bat

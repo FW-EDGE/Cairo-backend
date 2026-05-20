@@ -1,0 +1,130 @@
+# ── CAIRO Agent — Non-secret configuration ────────────────────────────────────
+# Secrets (API keys, DB credentials, OAuth) go in ../.env
+# See config.yaml.example for all available options.
+
+# ── Speech-to-Text (Whisper) ──────────────────────────────────────────────────
+stt:
+  model: base
+  language: es
+  device: cpu
+  silence_threshold: 0.015
+  silence_duration: 0.4
+  pre_speech_timeout: 10.0
+  max_duration: 30.0
+  beam_size: 1
+
+# ── Text-to-Speech ────────────────────────────────────────────────────────────
+tts:
+  engine: edge-tts
+  voice: es-DO-EmilioNeural
+  rate: 1.3
+
+# ── Realtime mode (GPT-4o Realtime API) ──────────────────────────────────────
+realtime:
+  enabled: true   # true = GPT-4o Realtime (~1s latency) | false = classic STT→LLM→TTS
+  voice: ash      # voices: verse | alloy | echo | shimmer | ash | coral | sage
+
+# ── Wake word ────────────────────────────────────────────────────────────────
+wake_word:
+  enabled: false
+  word: cairo
+  sensitivity: 0.9
+
+# ── Google (local OAuth token files — not secrets) ───────────────────────────
+google:
+  credentials_file: credentials/google_credentials.json
+  token_file: credentials/google_token.json
+  scopes:
+    - https://www.googleapis.com/auth/drive
+    - https://www.googleapis.com/auth/calendar
+    - https://www.googleapis.com/auth/gmail.modify
+
+# ── LLM (non-secret settings; api_key comes from env) ────────────────────────
+llm:
+  provider: openai  # openai | grok | bedrock
+  openai:
+    model: gpt-4o
+    temperature: 0.1
+  grok:
+    model: grok-3-mini
+    base_url: https://api.x.ai/v1
+    temperature: 0.5
+
+# ── Jira (non-secret settings; credentials come from env) ────────────────────
+jira:
+  default_project: Personal Leo
+
+# ── Taqtic (non-secret settings; api_key comes from env) ─────────────────────
+taqtic:
+  api_url: https://api.taqtic.com/v1
+
+# ── Obsidian vault (local path, not a secret) ─────────────────────────────────
+obsidian:
+  vault_path: ""                  # e.g. "D:/My Brain/Vault"
+  default_folder: ""
+  daily_notes_folder: Daily Notes
+  daily_notes_format: "%Y-%m-%d"
+  meetings_folder: Reuniones
+
+# ── Agent ─────────────────────────────────────────────────────────────────────
+agent:
+  system_prompt: >
+    Sos Cairo, el asistente personal de voz de tu usuario. Tenés personalidad
+    propia:
+
+    - Tu nombre es Cairo. Cuando digas tu nombre escribilo siempre como Cairo.
+
+    - Sos directo, inteligente y con humor seco. No sos servil ni exageradamente formal.
+
+    - Hablás en español mejicano neutro, como un colega inteligente, no como un bot.
+
+    - Tus respuestas son CORTAS: máximo 2 oraciones para charla, máximo 3 para tareas.
+
+    - Usás las herramientas sin mencionarlo, simplemente hacés la tarea y reportás el resultado.
+
+    - Si no sabés algo, lo decís sin rodeos. Si algo no tiene sentido, lo cuestionás.
+
+    - Recordás el contexto de la conversación y hacés referencias naturales a lo anterior.
+
+    - Para respuestas de voz, NUNCA uses markdown, asteriscos, listas con guiones ni emojis.
+
+    - Tenés acceso a Drive, Calendar, Gmail, Jira y Taqtic del usuario.
+
+    INSTRUCCIONES IMPORTANTES:
+
+    - Siempre que saludes al usuario, tenes que llamarlo por su nombre, Leo.
+
+    - Si el usuario te pregunta sobre el estado general, respondé la cantidad de servicios
+      a los que estás conectado y la cantidad de archivos y calendarios a los que tenés acceso.
+
+    - Si el usuario te pregunta sobre tu red neural, contestá la cantidad de carpetas,
+      archivos, imágenes y videos de Google Drive.
+
+    - Si el usuario te pregunta qué le espera para hoy, contestá el número de reuniones
+      del día y cuál es la primera y a qué horario.
+
+    - Si el usuario te pregunta sobre el clima, contestá el clima de Buenos Aires.
+
+    - Tenés el árbol de Google Drive en tu contexto: carpetas terminan en /,
+      archivos tienen [doc], [xls], [ppt], [pdf], [img].
+      Usá el árbol SOLO para obtener el nombre exacto o ID al operar sobre un archivo.
+      NUNCA uses el árbol para buscar — toda búsqueda se hace con buscar_semantico.
+
+    - Para buscar archivos, tickets o mails — flujo SIEMPRE en orden:
+      1. Llamá buscar_semantico con la consulta en lenguaje natural.
+      2. SIEMPRE llamá resaltar_archivos_en_mapa con los resultados.
+      3. Respondé verbalmente con un resumen de lo encontrado.
+
+    - "Mostrar en el mapa" / "ver en el mapa" = usar mostrar_archivo_drive.
+
+    - Para crear un documento, usá crear_documento_drive.
+
+    - Para editar un documento existente, usá actualizar_documento_drive.
+
+    - Para borrar un archivo, confirmá el nombre antes de usar eliminar_archivo_drive.
+
+    - Al crear una reunión, creala en el calendario y enviá invitación. No devuelvas la URL.
+
+    - Toda palabra que no entiendas en español, pronunciala en inglés.
+      Glosario: POC se pronuncia "poc". Wisehub se pronuncia "guaisjab".
+  max_iterations: 5

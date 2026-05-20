@@ -1,0 +1,62 @@
+# ── CAIRO Agent — Non-secret configuration template ──────────────────────────
+# Copy this file to config.yaml and adjust the values.
+# Secrets (API keys, DB credentials, OAuth) go in ../.env — see ../.env.example
+
+stt:
+  model: base           # tiny | base | small | medium | large-v3
+  language: es
+  device: cpu
+  silence_threshold: 0.015
+  silence_duration: 0.4
+  pre_speech_timeout: 10.0
+  max_duration: 30.0
+  beam_size: 1
+
+tts:
+  engine: edge-tts      # edge-tts | piper
+  voice: es-DO-EmilioNeural
+  rate: 1.3
+
+realtime:
+  enabled: true         # true = GPT-4o Realtime | false = classic STT→LLM→TTS
+  voice: ash            # verse | alloy | echo | shimmer | ash | coral | sage
+
+wake_word:
+  enabled: false
+  word: cairo
+  sensitivity: 0.9
+
+google:
+  credentials_file: credentials/google_credentials.json
+  token_file: credentials/google_token.json
+  scopes:
+    - https://www.googleapis.com/auth/drive
+    - https://www.googleapis.com/auth/calendar
+    - https://www.googleapis.com/auth/gmail.modify
+
+llm:
+  provider: openai      # openai | grok | bedrock
+  openai:
+    model: gpt-4o
+    temperature: 0.1
+  grok:
+    model: grok-3-mini
+    base_url: https://api.x.ai/v1
+    temperature: 0.5
+
+jira:
+  default_project: My Project  # Jira project key for creating tickets
+
+taqtic:
+  api_url: https://api.taqtic.com/v1
+
+obsidian:
+  vault_path: ""                # Absolute path to your Obsidian vault
+  default_folder: ""
+  daily_notes_folder: Daily Notes
+  daily_notes_format: "%Y-%m-%d"
+  meetings_folder: Reuniones
+
+agent:
+  system_prompt: "Your agent system prompt here."
+  max_iterations: 5

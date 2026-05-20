@@ -26,8 +26,6 @@ import { driveRoutes } from "./routes/drive.js";
 import { mailRoutes } from "./routes/mail.js";
 import { chatRoutes } from "./routes/chat.js";
 import { embeddingsRoutes } from "./routes/embeddings.js";
-import { jiraRoutes } from "./routes/jira.js";
-import { configRoutes } from "./routes/configRoute.js";
 import { vectorMapRoutes } from "./routes/vectorMap.js";
 import { skillsRoutes } from "./routes/skills.js";
 
@@ -63,8 +61,6 @@ await fastify.register(driveRoutes);
 await fastify.register(mailRoutes);
 await fastify.register(chatRoutes);
 await fastify.register(embeddingsRoutes);
-await fastify.register(jiraRoutes);
-await fastify.register(configRoutes);
 await fastify.register(vectorMapRoutes);
 await fastify.register(skillsRoutes);
 

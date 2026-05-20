@@ -27,16 +27,6 @@ function parseTime(iso: string): string {
 }
 
 export async function calendarRoutes(fastify: FastifyInstance): Promise<void> {
-  // GET /calendar — legacy stub
-  fastify.get('/calendar', async (_request: FastifyRequest, reply: FastifyReply) => {
-    return reply.send({ events: [], raw: '' });
-  });
-
-  // GET /calendar/today — legacy stub
-  fastify.get('/calendar/today', async (_request: FastifyRequest, reply: FastifyReply) => {
-    return reply.send({ events: [], raw: '' });
-  });
-
   // GET /calendar/week
   fastify.get(
     '/calendar/week',

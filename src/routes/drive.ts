@@ -261,96 +261,6 @@ async function bfsDriveById(
 }
 
 export async function driveRoutes(fastify: FastifyInstance): Promise<void> {
-  // GET /drive — last 8 files
-  fastify.get('/drive', { preHandler: requireUser }, async (request: FastifyRequest, reply: FastifyReply) => {
-    try {
-      const user = request.user!;
-      if (!user.google_tokens) {
-        return reply.status(403).send({ error: 'Google account not connected' });
-      }
-
-      const authClient = tokensToClient(user.google_tokens, user._id);
-      const driveApi = google.drive({ version: 'v3', auth: authClient });
-
-      const res = await driveApi.files.list({
-        q: "trashed=false and 'me' in owners",
-        fields: DRIVE_FIELDS,
-        orderBy: 'modifiedTime desc',
-        pageSize: 8,
-      });
-
-      return reply.send({
-        files: (res.data.files ?? []).map(googleFileToInternal),
-      });
-    } catch (err) {
-      console.error('[Drive] GET /drive error:', err);
-      return reply.status(500).send({ error: 'Failed to fetch drive files' });
-    }
-  });
-
-  // GET /drive/tree — root level
-  fastify.get('/drive/tree', { preHandler: requireUser }, async (request: FastifyRequest, reply: FastifyReply) => {
-    try {
-      const user = request.user!;
-      if (!user.google_tokens) {
-        return reply.status(403).send({ error: 'Google account not connected' });
-      }
-
-      const authClient = tokensToClient(user.google_tokens, user._id);
-      const driveApi = google.drive({ version: 'v3', auth: authClient });
-
-      const res = await driveApi.files.list({
-        q: "'root' in parents and trashed=false",
-        fields: DRIVE_FIELDS,
-        pageSize: 200,
-        orderBy: 'folder,name',
-      });
-
-      return reply.send({
-        files: (res.data.files ?? []).map(googleFileToInternal),
-      });
-    } catch (err) {
-      console.error('[Drive] GET /drive/tree error:', err);
-      return reply.status(500).send({ error: 'Failed to fetch drive tree' });
-    }
-  });
-
-  // GET /drive/folder/:folderId
-  fastify.get('/drive/folder/:folderId', { preHandler: requireUser }, async (request: FastifyRequest, reply: FastifyReply) => {
-    try {
-      const user = request.user!;
-      if (!user.google_tokens) {
-        return reply.status(403).send({ error: 'Google account not connected' });
-      }
-
-      const { folderId } = request.params as { folderId: string };
-      const authClient = tokensToClient(user.google_tokens, user._id);
-      const driveApi = google.drive({ version: 'v3', auth: authClient });
-
-      const files: DriveFile[] = [];
-      let pageToken: string | undefined;
-
-      do {
-        const res = await driveApi.files.list({
-          q: `'${folderId}' in parents and trashed=false`,
-          fields: DRIVE_FIELDS,
-          pageSize: 1000,
-          pageToken,
-          includeItemsFromAllDrives: true,
-          supportsAllDrives: true,
-          corpora: 'allDrives',
-        });
-        files.push(...(res.data.files ?? []).map(googleFileToInternal));
-        pageToken = res.data.nextPageToken ?? undefined;
-      } while (pageToken);
-
-      return reply.send({ files });
-    } catch (err) {
-      console.error('[Drive] GET /drive/folder/:folderId error:', err);
-      return reply.status(500).send({ error: 'Failed to fetch folder contents' });
-    }
-  });
-
   // GET /drive/cached
   fastify.get('/drive/cached', { preHandler: requireUser }, async (request: FastifyRequest, reply: FastifyReply) => {
     try {
@@ -368,42 +278,6 @@ export async function driveRoutes(fastify: FastifyInstance): Promise<void> {
     } catch (err) {
       console.error('[Drive] GET /drive/cached error:', err);
       return reply.status(500).send({ error: 'Failed to fetch drive cache' });
-    }
-  });
-
-  // GET /drive/all — full BFS, save to cache
-  fastify.get('/drive/all', { preHandler: requireUser }, async (request: FastifyRequest, reply: FastifyReply) => {
-    try {
-      const user = request.user!;
-      if (!user.google_tokens) {
-        return reply.status(403).send({ error: 'Google account not connected' });
-      }
-
-      const authClient = tokensToClient(user.google_tokens, user._id);
-      const driveApi = google.drive({ version: 'v3', auth: authClient });
-
-      const [mydrive, sharedDrives, sharedWithMe] = await Promise.all([
-        bfsMyDrive(driveApi).catch((err) => {
-          console.error('[Drive] BFS MyDrive error:', err);
-          return [];
-        }),
-        bfsSharedDrives(driveApi, 6).catch((err) => {
-          console.error('[Drive] BFS Shared Drives error:', err);
-          return [];
-        }),
-        fetchSharedWithMe(driveApi).catch((err) => {
-          console.error('[Drive] Fetch Shared With Me error:', err);
-          return { id: '__shared_with_me__', name: 'Compartidos conmigo', mimeType: 'application/vnd.google-apps.folder', type: 'folder', shared: true, children: [] } as DriveFile;
-        }),
-      ]);
-
-      const shared = [sharedWithMe, ...sharedDrives];
-      await saveDriveCache(user._id, mydrive, shared);
-
-      return reply.send({ mydrive, shared, fetched_at: new Date().toISOString() });
-    } catch (err) {
-      console.error('[Drive] GET /drive/all error:', err);
-      return reply.status(500).send({ error: 'Failed to fetch all drive files' });
     }
   });
 
