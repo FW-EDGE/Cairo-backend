@@ -31,7 +31,7 @@ class PatchedAgent extends OrigAgent {
 (https as any).Agent = PatchedAgent;
 
 // Also patch the global agent that some libs use as a fallback
-https.globalAgent = new PatchedAgent({ keepAlive: false });
+(https as any).globalAgent = new PatchedAgent({ keepAlive: false });
 
 // Belt-and-suspenders: set the env var too (covers native http2 and similar)
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
