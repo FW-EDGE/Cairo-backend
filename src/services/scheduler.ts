@@ -4,9 +4,33 @@ import { runFullIndex } from './embeddingsIndexer.js';
 import { getGoogleTokens, PaidTier } from '../db/users.js';
 
 /**
+ * Ping our own /health every 14 min so Render free tier never sleeps.
+ * Uses the public URL → counts as real inbound traffic for Render.
+ */
+function startKeepAlive(): void {
+  const url = process.env.RENDER_EXTERNAL_URL
+    ? `${process.env.RENDER_EXTERNAL_URL}/health`
+    : null;
+
+  if (!url) return; // only runs on Render (env var is set automatically)
+
+  setInterval(async () => {
+    try {
+      await fetch(url);
+      console.log('[KeepAlive] pinged', url);
+    } catch (err) {
+      console.error('[KeepAlive] ping failed:', err);
+    }
+  }, 14 * 60 * 1000); // every 14 minutes
+
+  console.log('[KeepAlive] started — pinging', url, 'every 14 min');
+}
+
+/**
  * Background scheduler to keep embeddings fresh.
  */
 export function startScheduler() {
+  startKeepAlive();
   console.log('[Scheduler] Starting background tasks...');
 
   // Run every 12 hours
