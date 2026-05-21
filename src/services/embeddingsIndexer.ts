@@ -2,8 +2,6 @@ import { ObjectId } from 'mongodb';
 import OpenAI from 'openai';
 import { google, drive_v3 } from 'googleapis';
 import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-const pdf = require('pdf-parse');
 
 import { embeddingsCol, driveCacheCol } from '../db/client.js';
 import { getConfig } from '../config.js';
@@ -130,19 +128,14 @@ export async function indexDriveForUser(
           text = res.data as string;
         } else if (file.mimeType === 'application/pdf') {
           const res = await drive.files.get({ fileId: file.id, alt: 'media' }, { responseType: 'arraybuffer' });
-          let parsePdf: any = (pdf as any).PDFParse || pdf;
-          if (typeof parsePdf !== 'function' && (pdf as any).default) parsePdf = (pdf as any).default.PDFParse || (pdf as any).default;
-          
-          if (typeof parsePdf === 'function') {
-            try {
-              const data = await parsePdf(Buffer.from(res.data as ArrayBuffer));
-              text = data.text || data.textContent || '';
-            } catch {
-              // Try as class
-              const instance = new (parsePdf as any)(Buffer.from(res.data as ArrayBuffer));
-              const data = await (instance.parse ? instance.parse() : instance);
-              text = data.text || data.textContent || '';
-            }
+          try {
+            // Lazy-load pdf-parse (1.1.1) so a broken install never crashes startup
+            const _require = createRequire(import.meta.url);
+            const pdfParse = _require('pdf-parse');
+            const data = await pdfParse(Buffer.from(res.data as ArrayBuffer));
+            text = data.text || '';
+          } catch (err) {
+            console.warn(`[Embeddings] PDF parse failed for "${file.name}":`, err);
           }
         } else {
           const res = await drive.files.get({ fileId: file.id, alt: 'media' }, { responseType: 'text' });
