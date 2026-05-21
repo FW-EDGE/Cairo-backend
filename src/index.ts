@@ -9,6 +9,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 import express from "express";
+import cors from "cors";
 import http from "http";
 import cookieParser from "cookie-parser";
 import { WebSocketServer } from "ws";
@@ -32,22 +33,17 @@ console.log("[CAIRO] FRONTEND_URL env:", process.env.FRONTEND_URL);
 const app = express();
 const server = http.createServer(app);
 
-// ── CORS — manual middleware, runs before everything ──────────────────────────
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (origin) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Access-Control-Allow-Credentials", "true");
-    res.setHeader("Vary", "Origin");
-  }
-  if (req.method === "OPTIONS") {
-    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,Cookie");
-    res.setHeader("Access-Control-Max-Age", "86400");
-    return res.status(204).end();
-  }
-  next();
-});
+// ── CORS ──────────────────────────────────────────────────────────────────────
+// origin:true reflects the exact request Origin back, works for any domain
+const corsOptions: cors.CorsOptions = {
+  origin: true,
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "Cookie"],
+  maxAge: 86400,
+};
+app.options("*", cors(corsOptions)); // handle ALL preflight requests first
+app.use(cors(corsOptions));          // attach CORS headers to every response
 
 app.use(cookieParser());
 app.use(express.json());
