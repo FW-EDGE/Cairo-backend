@@ -43,13 +43,15 @@ const fastify = Fastify({
 
 // Manual CORS — inject headers on every response.
 // onSend fires last, after route handlers and error handlers, so headers are always present.
-fastify.addHook("onSend", async (request, reply) => {
+// MUST return payload or Fastify drops the response body.
+fastify.addHook("onSend", async (request, reply, payload) => {
   const origin = request.headers.origin;
   if (origin) {
     reply.header("Access-Control-Allow-Origin", origin);
     reply.header("Access-Control-Allow-Credentials", "true");
     reply.header("Vary", "Origin");
   }
+  return payload;
 });
 
 // Wildcard OPTIONS handler — answers ALL preflight requests before route handlers run

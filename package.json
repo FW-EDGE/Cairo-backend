@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "dev:nodemon": "nodemon --exec tsx src/index.ts --ext ts",
-    "build": "tsc --build --clean && tsc",
+    "build": "tsc",
     "start": "node dist/index.js"
   },
   "dependencies": {
