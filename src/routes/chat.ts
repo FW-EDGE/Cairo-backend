@@ -10,10 +10,11 @@ const router = Router();
 
 // POST /chat  — responds as SSE stream to avoid proxy timeouts on long LLM calls
 router.post('/chat', requireUser, async (req: Request, res: Response) => {
-  // Open SSE connection immediately so Render/Cloudflare never timeout waiting for headers
+  // Open SSE connection immediately — prevents Render/Cloudflare timeout
   res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // disable Nginx/Cloudflare buffering
   res.flushHeaders();
 
   /** Send a structured SSE event */
@@ -51,23 +52,11 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
 
     // ── Tool-call loop ────────────────────────────────────────────────────────
     while (iteration < 5) {
-      const { content, tool_calls } = await getLlmResponse(messages, customContext, tools);
-
-      if (!tool_calls || tool_calls.length === 0) {
-        // ── Final response — stream tokens ───────────────────────────────────
-        if (content) {
-          // The non-streaming call already returned full content; stream it char-by-char
-          // for consistent UX. For production, swap getLlmResponse for getLlmStream here.
-          for (const char of content) {
-            send({ type: 'delta', content: char });
-          }
-        } else {
-          // Re-run as a streaming call (happens when tool loop ended with no content)
-          for await (const token of getLlmStream(messages, customContext)) {
-            send({ type: 'delta', content: token });
-          }
+      // ── No tools: stream tokens directly from OpenAI (true SSE) ─────────────
+      if (tools.length === 0) {
+        for await (const token of getLlmStream(messages, customContext)) {
+          send({ type: 'delta', content: token });
         }
-
         if (ragItems.length > 0) {
           broadcastJson({
             type: 'highlight_nodes',
@@ -76,6 +65,22 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
           });
         }
         send({ type: 'done', tier: user.tier, reportData: finalReportData });
+        return;
+      }
+
+      // ── Tools enabled: non-streaming call to capture tool_calls ─────────────
+      const { content, tool_calls } = await getLlmResponse(messages, customContext, tools);
+
+      if (!tool_calls || tool_calls.length === 0) {
+        // Final answer after tool iterations — content already fetched, send as-is
+        send({ type: 'done', tier: user.tier, response: content, reportData: finalReportData });
+        if (ragItems.length > 0) {
+          broadcastJson({
+            type: 'highlight_nodes',
+            label: message.slice(0, 60),
+            nodes: ragItems.map(i => ({ name: i.name, url: i.url, file_type: i.type, source: i.source })),
+          });
+        }
         return;
       }
 

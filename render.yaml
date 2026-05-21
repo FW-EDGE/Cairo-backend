@@ -5,6 +5,7 @@ services:
     buildCommand: npm install && npm run build
     startCommand: node --max-old-space-size=460 dist/index.js
     healthCheckPath: /health
+    websocketEnabled: true
     envVars:
       - key: NODE_ENV
         value: production
