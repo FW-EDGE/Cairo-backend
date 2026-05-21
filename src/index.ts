@@ -85,8 +85,9 @@ async function start(): Promise<void> {
     await ensureIndexes();
     startHeartbeatMonitor();
     startScheduler();
-    await fastify.listen({ port: 7777, host: "0.0.0.0" });
-    console.log("[CAIRO] Backend running on http://0.0.0.0:7777");
+    const port = parseInt(process.env.PORT ?? "7777", 10);
+    await fastify.listen({ port, host: "0.0.0.0" });
+    console.log(`[CAIRO] Backend running on http://0.0.0.0:${port}`);
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);
