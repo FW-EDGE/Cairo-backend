@@ -39,12 +39,24 @@ const fastify = Fastify({
 });
 
 // Register plugins
-await fastify.register(fastifyCors, {
-  origin: [
+const allowedOrigins = new Set(
+  [
     "http://localhost:5173",
     "http://localhost:5174",
     config.auth.frontend_url,
-  ],
+  ].map((o) => o.replace(/\/$/, "")) // strip any trailing slash
+);
+console.log("[CAIRO] CORS allowed origins:", [...allowedOrigins]);
+
+await fastify.register(fastifyCors, {
+  origin: (origin, cb) => {
+    // Allow server-to-server requests (no origin header)
+    if (!origin) return cb(null, true);
+    const clean = origin.replace(/\/$/, "");
+    if (allowedOrigins.has(clean)) return cb(null, true);
+    console.warn(`[CORS] Blocked: ${origin}`);
+    cb(new Error(`CORS: origin not allowed — ${origin}`), false);
+  },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "Cookie"],
