@@ -41,31 +41,29 @@ const fastify = Fastify({
   disableRequestLogging: true,
 });
 
-// Manual CORS — bypass @fastify/cors entirely, inject headers on every request.
-// OPTIONS preflight is answered directly in the hook before any route runs.
-fastify.addHook("onRequest", async (request, reply) => {
+// Manual CORS — inject headers on every response.
+// onSend fires last, after route handlers and error handlers, so headers are always present.
+fastify.addHook("onSend", async (request, reply) => {
   const origin = request.headers.origin;
   if (origin) {
     reply.header("Access-Control-Allow-Origin", origin);
     reply.header("Access-Control-Allow-Credentials", "true");
     reply.header("Vary", "Origin");
   }
-  if (request.method === "OPTIONS") {
-    reply.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-    reply.header("Access-Control-Allow-Headers", "Content-Type,Authorization,Cookie");
-    reply.header("Access-Control-Max-Age", "86400");
-    return reply.status(204).send();
-  }
 });
 
-// Error handler — re-inject CORS so errors don't strip the headers
-fastify.setErrorHandler((error, request, reply) => {
+// Wildcard OPTIONS handler — answers ALL preflight requests before route handlers run
+fastify.options("/*", async (request, reply) => {
   const origin = request.headers.origin;
   if (origin) {
     reply.header("Access-Control-Allow-Origin", origin);
     reply.header("Access-Control-Allow-Credentials", "true");
+    reply.header("Vary", "Origin");
   }
-  reply.status(error.statusCode ?? 500).send({ error: error.message });
+  reply.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+  reply.header("Access-Control-Allow-Headers", "Content-Type,Authorization,Cookie");
+  reply.header("Access-Control-Max-Age", "86400");
+  return reply.status(204).send();
 });
 
 await fastify.register(fastifyCookie);
@@ -82,8 +80,8 @@ await fastify.register(embeddingsRoutes);
 await fastify.register(vectorMapRoutes);
 await fastify.register(skillsRoutes);
 
-// Health check
-fastify.get("/health", async () => ({ status: "ok", version: "1.0.0" }));
+// Health check — version bump lets us confirm which deploy is live on Railway
+fastify.get("/health", async () => ({ status: "ok", version: "cors-manual-v3" }));
 
 // Startup
 async function start(): Promise<void> {
