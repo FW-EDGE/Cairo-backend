@@ -26,10 +26,15 @@ import { getConfig } from '../config.js';
 import { usersCol } from '../db/client.js';
 import { ObjectId } from 'mongodb';
 
+const IS_PROD = process.env.NODE_ENV === 'production';
+
 function setCairoTokenCookie(reply: FastifyReply, token: string): void {
   reply.setCookie(COOKIE_NAME, token, {
     httpOnly: true,
-    sameSite: 'lax',
+    // Cross-origin (Vercel ↔ Railway): sameSite must be 'none' + secure.
+    // Locally both run on localhost so 'lax' is fine and secure isn't needed.
+    sameSite: IS_PROD ? 'none' : 'lax',
+    secure:   IS_PROD,
     path: '/',
     maxAge: EXPIRE_DAYS * 86400,
   });
