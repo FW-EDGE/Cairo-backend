@@ -15,7 +15,6 @@ process.on("unhandledRejection", (reason) => {
 });
 
 import Fastify from "fastify";
-import fastifyCors from "@fastify/cors";
 import fastifyCookie from "@fastify/cookie";
 import fastifyWebSocket from "@fastify/websocket";
 import { getConfig } from "./config.js";
@@ -33,6 +32,7 @@ import { vectorMapRoutes } from "./routes/vectorMap.js";
 import { skillsRoutes } from "./routes/skills.js";
 
 const config = getConfig();
+console.log("[CAIRO] FRONTEND_URL env:", process.env.FRONTEND_URL);
 
 const fastify = Fastify({
   logger: {
@@ -41,19 +41,31 @@ const fastify = Fastify({
   disableRequestLogging: true,
 });
 
-// Register plugins
-// Reflect the request Origin back — works with credentials for any allowed caller.
-// The JWT on every authenticated request is the real auth boundary.
-const frontendUrl = config.auth.frontend_url.replace(/\/$/, "");
-console.log("[CAIRO] CORS frontend_url:", frontendUrl);
+// Manual CORS — bypass @fastify/cors entirely, inject headers on every request.
+// OPTIONS preflight is answered directly in the hook before any route runs.
+fastify.addHook("onRequest", async (request, reply) => {
+  const origin = request.headers.origin;
+  if (origin) {
+    reply.header("Access-Control-Allow-Origin", origin);
+    reply.header("Access-Control-Allow-Credentials", "true");
+    reply.header("Vary", "Origin");
+  }
+  if (request.method === "OPTIONS") {
+    reply.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+    reply.header("Access-Control-Allow-Headers", "Content-Type,Authorization,Cookie");
+    reply.header("Access-Control-Max-Age", "86400");
+    return reply.status(204).send();
+  }
+});
 
-await fastify.register(fastifyCors, {
-  origin: true,   // reflect request Origin → always matches, works with credentials
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "Cookie"],
-  preflightContinue: false,
-  optionsSuccessStatus: 204,
+// Error handler — re-inject CORS so errors don't strip the headers
+fastify.setErrorHandler((error, request, reply) => {
+  const origin = request.headers.origin;
+  if (origin) {
+    reply.header("Access-Control-Allow-Origin", origin);
+    reply.header("Access-Control-Allow-Credentials", "true");
+  }
+  reply.status(error.statusCode ?? 500).send({ error: error.message });
 });
 
 await fastify.register(fastifyCookie);
