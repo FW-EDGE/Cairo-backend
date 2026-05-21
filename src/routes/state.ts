@@ -114,17 +114,21 @@ export async function stateRoutes(fastify: FastifyInstance): Promise<void> {
   // WS /ws
   fastify.get('/ws', { websocket: true }, (connection, _req) => {
     const socket = connection.socket;
-    // Send current state on connect
-    socket.send(JSON.stringify({ type: 'state', ...cairoState }));
-    connectedClients.add(socket);
+    try {
+      // Send current state on connect
+      socket.send(JSON.stringify({ type: 'state', ...cairoState }));
+      connectedClients.add(socket);
 
-    socket.on('close', () => {
-      connectedClients.delete(socket);
-    });
+      socket.on('close', () => {
+        connectedClients.delete(socket);
+      });
 
-    socket.on('error', (err: Error) => {
-      console.error('[WS] Client error:', err);
-      connectedClients.delete(socket);
-    });
+      socket.on('error', (err: Error) => {
+        console.error('[WS] Client error:', err);
+        connectedClients.delete(socket);
+      });
+    } catch (err) {
+      console.error('[WS] WS handler error:', err);
+    }
   });
 }

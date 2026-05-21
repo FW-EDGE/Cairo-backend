@@ -4,11 +4,14 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 // Catch any crash and print it before dying — helps diagnose silent ECONNRESET crashes
 process.on("uncaughtException", (err) => {
   console.error("[CAIRO] UNCAUGHT EXCEPTION:", err);
-  process.exit(1);
+  // Don't exit — let Railway keep the process alive so it can serve requests.
+  // Fastify's own error boundary handles route errors; only truly unrecoverable
+  // errors (EADDRINUSE, etc.) should kill the process.
 });
 process.on("unhandledRejection", (reason) => {
+  // Log but don't exit — an unhandled rejection in one async chain shouldn't
+  // take down the whole server and cause a Railway restart loop.
   console.error("[CAIRO] UNHANDLED REJECTION:", reason);
-  process.exit(1);
 });
 
 import Fastify from "fastify";
