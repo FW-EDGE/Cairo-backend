@@ -89,44 +89,61 @@ export const REPORT_TOOL = {
   },
 } as const;
 
-export async function getLlmResponse(
+function buildFormattedMessages(
   messages: any[],
   contextBlock: string,
-  tools?: any[]
-): Promise<{ content: string; tool_calls?: any[] }> {
-  const client = getOpenAI();
-  const model = getModel();
-
+): OpenAI.Chat.ChatCompletionMessageParam[] {
   let systemMessage = CAIRO_SYSTEM_BASE;
   if (contextBlock) {
     systemMessage +=
       `\n\n---\n${CAIRO_CONTEXT_INSTRUCTIONS}\n\n---\n\n` +
       `CONTEXTO DEL USUARIO:\n${contextBlock}`;
   }
-
-  // Map messages to OpenAI format, preserving tool_calls and tool_call_id
-  const formattedMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+  return [
     { role: 'system', content: systemMessage },
     ...messages.map((m) => {
       const msg: any = { role: m.role, content: m.content || null };
-      if (m.tool_calls) msg.tool_calls = m.tool_calls;
-      if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
-      if (m.name) msg.name = m.name;
+      if (m.tool_calls)    msg.tool_calls    = m.tool_calls;
+      if (m.tool_call_id)  msg.tool_call_id  = m.tool_call_id;
+      if (m.name)          msg.name          = m.name;
       return msg;
     }),
   ];
+}
 
+/** Non-streaming call — used for tool-call iterations where we need tool_calls back. */
+export async function getLlmResponse(
+  messages: any[],
+  contextBlock: string,
+  tools?: any[]
+): Promise<{ content: string; tool_calls?: any[] }> {
+  const client = getOpenAI();
   const completion = await client.chat.completions.create({
-    model,
-    messages: formattedMessages,
+    model: getModel(),
+    messages: buildFormattedMessages(messages, contextBlock),
     max_tokens: 2048,
     temperature: 0.5,
     tools: tools && tools.length > 0 ? tools : undefined,
   });
-
   const message = completion.choices[0]?.message;
-  return {
-    content: message?.content ?? '',
-    tool_calls: message?.tool_calls,
-  };
+  return { content: message?.content ?? '', tool_calls: message?.tool_calls };
+}
+
+/** Streaming call — used for the final response; yields tokens as they arrive. */
+export async function* getLlmStream(
+  messages: any[],
+  contextBlock: string,
+): AsyncGenerator<string> {
+  const client = getOpenAI();
+  const stream = await client.chat.completions.create({
+    model: getModel(),
+    messages: buildFormattedMessages(messages, contextBlock),
+    max_tokens: 2048,
+    temperature: 0.5,
+    stream: true,
+  });
+  for await (const chunk of stream) {
+    const token = chunk.choices[0]?.delta?.content;
+    if (token) yield token;
+  }
 }

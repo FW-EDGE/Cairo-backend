@@ -1,21 +1,35 @@
 import { Router, Request, Response } from 'express';
 import { requireUser } from '../auth/middleware.js';
 import { buildContextBlock } from '../services/rag.js';
-import { getLlmResponse, REPORT_TOOL, SEARCH_DRIVE_TOOL, READ_FILE_TOOL } from '../services/llm.js';
+import { getLlmResponse, getLlmStream, REPORT_TOOL, SEARCH_DRIVE_TOOL, READ_FILE_TOOL } from '../services/llm.js';
 import { broadcastJson } from '../websocket.js';
 import { getGoogleTokens } from '../db/users.js';
 import { createDriveFolder, copyDriveFile, updateFileContent, searchDriveFiles, getFileContent } from '../services/driveActions.js';
 
 const router = Router();
 
-// POST /chat
+// POST /chat  — responds as SSE stream to avoid proxy timeouts on long LLM calls
 router.post('/chat', requireUser, async (req: Request, res: Response) => {
+  // Open SSE connection immediately so Render/Cloudflare never timeout waiting for headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  /** Send a structured SSE event */
+  const send = (payload: object) => res.write(`data: ${JSON.stringify(payload)}\n\n`);
+
+  /** Keepalive comment every 20 s — prevents proxy read-timeout during LLM wait */
+  const keepalive = setInterval(() => res.write(': ping\n\n'), 20_000);
+
   try {
     const user = req.user!;
     const { message, history = [] } = req.body as { message: string; history?: any[] };
-    if (!message) { res.status(400).json({ error: 'message is required' }); return; }
+    if (!message) { send({ type: 'error', message: 'message is required' }); return; }
 
+    // ── RAG context ───────────────────────────────────────────────────────────
     const { context: contextBlock, items: ragItems } = await buildContextBlock(user._id, message, user.tier, history);
+
     const isReportEnabled = user.skills?.['report_generation'] === true;
     const tools = isReportEnabled ? [REPORT_TOOL, SEARCH_DRIVE_TOOL, READ_FILE_TOOL] : [];
 
@@ -25,21 +39,35 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
       if (user.reportSettings?.prompt) customContext += `\nINSTRUCCIONES ESPECÍFICAS:\n${user.reportSettings.prompt}`;
     } else {
       customContext += `\n\n### RESTRICCIÓN IMPORTANTE: GENERACIÓN DE INFORMES DESACTIVADA\n`;
-      customContext += `Si el usuario te pide un informe, un SOW, o la creación de un documento, NO OFREZCAS AYUDA. \n`;
-      customContext += `Debes responder estrictamente que NO tienes activada la habilidad de "Generación de Informes" y que el usuario debe activarla desde el panel de Skills en la interfaz.\n`;
-      customContext += `No intentes simular el informe ni dar una respuesta genérica. Sé directo sobre la necesidad de activar el Skill.\n`;
+      customContext += `Si el usuario te pide un informe o un SOW NO OFREZCAS AYUDA. `;
+      customContext += `Decí que no tenés activada la habilidad de "Generación de Informes" y que debe activarla desde Skills.\n`;
     }
 
     let messages: any[] = [...history.slice(-18), { role: 'user', content: message }];
     const tokens = await getGoogleTokens(user._id);
 
-    let iteration = 0;
+    let iteration   = 0;
     let finalReportData: any = null;
 
+    // ── Tool-call loop ────────────────────────────────────────────────────────
     while (iteration < 5) {
       const { content, tool_calls } = await getLlmResponse(messages, customContext, tools);
 
       if (!tool_calls || tool_calls.length === 0) {
+        // ── Final response — stream tokens ───────────────────────────────────
+        if (content) {
+          // The non-streaming call already returned full content; stream it char-by-char
+          // for consistent UX. For production, swap getLlmResponse for getLlmStream here.
+          for (const char of content) {
+            send({ type: 'delta', content: char });
+          }
+        } else {
+          // Re-run as a streaming call (happens when tool loop ended with no content)
+          for await (const token of getLlmStream(messages, customContext)) {
+            send({ type: 'delta', content: token });
+          }
+        }
+
         if (ragItems.length > 0) {
           broadcastJson({
             type: 'highlight_nodes',
@@ -47,34 +75,42 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
             nodes: ragItems.map(i => ({ name: i.name, url: i.url, file_type: i.type, source: i.source })),
           });
         }
-        res.json({ response: content, tier: user.tier, reportData: finalReportData });
+        send({ type: 'done', tier: user.tier, reportData: finalReportData });
         return;
       }
 
+      // ── Execute tools ─────────────────────────────────────────────────────
       messages.push({ role: 'assistant', content, tool_calls });
 
       for (const call of tool_calls) {
         const args = JSON.parse(call.function.arguments);
-        let toolResult = "";
+        let toolResult = '';
+
+        const toolLabels: Record<string, string> = {
+          search_drive:    'Buscando en Drive…',
+          read_drive_file: 'Leyendo archivo…',
+          generate_report: 'Generando informe…',
+        };
+        send({ type: 'status', message: toolLabels[call.function.name] ?? 'Procesando…' });
 
         if (!tokens) {
-          toolResult = "Error: No Google tokens found. Ask user to re-login.";
+          toolResult = 'Error: No Google tokens found. Ask user to re-login.';
         } else {
           try {
             if (call.function.name === 'search_drive') {
               const files = await searchDriveFiles(user._id, tokens, args.query);
-              toolResult = files.map((f: any) => `Name: ${f.name}, ID: ${f.id}`).join('\n') || "No files found.";
+              toolResult = files.map((f: any) => `Name: ${f.name}, ID: ${f.id}`).join('\n') || 'No files found.';
             } else if (call.function.name === 'read_drive_file') {
               toolResult = await getFileContent(user._id, tokens, args.fileId);
             } else if (call.function.name === 'generate_report') {
               const { projectName, reportContent } = args;
-              const parentId = user.reportSettings?.parentFolderId;
+              const parentId  = user.reportSettings?.parentFolderId;
               const templateId = user.reportSettings?.templateId;
               if (!parentId || !templateId) {
-                toolResult = "Error: Missing Folder or Template ID in settings.";
+                toolResult = 'Error: Missing Folder or Template ID in settings.';
               } else {
                 const folderId = await createDriveFolder(user._id, tokens, projectName, parentId);
-                const fileId = await copyDriveFile(user._id, tokens, templateId, projectName, folderId);
+                const fileId   = await copyDriveFile(user._id, tokens, templateId, projectName, folderId);
                 await updateFileContent(user._id, tokens, fileId, reportContent);
                 finalReportData = { fileId, folderId, projectName };
                 toolResult = `SUCCESS: Report generated. File ID: ${fileId}`;
@@ -91,10 +127,13 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
       iteration++;
     }
 
-    res.json({ response: "CAIRO ha excedido los pasos permitidos para procesar esta solicitud.", tier: user.tier });
+    send({ type: 'done', tier: user.tier, response: 'CAIRO ha excedido los pasos permitidos para procesar esta solicitud.' });
   } catch (err) {
     console.error('[Chat] Error:', err);
-    res.status(500).json({ error: 'Internal Server Error' });
+    send({ type: 'error', message: 'Error interno del servidor' });
+  } finally {
+    clearInterval(keepalive);
+    res.end();
   }
 });
 
