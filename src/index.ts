@@ -42,15 +42,13 @@ const fastify = Fastify({
 });
 
 // Register plugins
-const allowedOrigins = [
-  "http://localhost:5173",
-  "http://localhost:5174",
-  config.auth.frontend_url.replace(/\/$/, ""),
-];
-console.log("[CAIRO] CORS allowed origins:", allowedOrigins);
+// Reflect the request Origin back — works with credentials for any allowed caller.
+// The JWT on every authenticated request is the real auth boundary.
+const frontendUrl = config.auth.frontend_url.replace(/\/$/, "");
+console.log("[CAIRO] CORS frontend_url:", frontendUrl);
 
 await fastify.register(fastifyCors, {
-  origin: allowedOrigins,
+  origin: true,   // reflect request Origin → always matches, works with credentials
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "Cookie"],
