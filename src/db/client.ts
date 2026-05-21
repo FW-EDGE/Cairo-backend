@@ -11,10 +11,24 @@ export async function getDb(): Promise<Db> {
   const { uri, database } = config.mongodb;
 
   client = new MongoClient(uri, {
-    // Atlas TLS certs can fail verification on Windows (UNABLE_TO_VERIFY_LEAF_SIGNATURE)
-    // when the intermediate CA is missing from the local trust store.
     tlsAllowInvalidCertificates: true,
+    serverSelectionTimeoutMS: 10000,
+    connectTimeoutMS: 10000,
+    socketTimeoutMS: 45000,
   });
+
+  // Prevent unhandled 'error' events from crashing the process
+  client.on('error', (err) => {
+    console.error('[MongoDB] Client error (handled):', err);
+    client = null;
+    db = null;
+  });
+  client.on('close', () => {
+    console.warn('[MongoDB] Connection closed — will reconnect on next request');
+    client = null;
+    db = null;
+  });
+
   await client.connect();
   db = client.db(database);
   console.log(`[MongoDB] Connected to ${database}`);
