@@ -13,10 +13,11 @@ export interface VectorPoint {
   z: number;
 }
 
-// No hard cap — tier limits are enforced at index time, not at query time.
-// Loading only lightweight fields (no full text) keeps memory manageable even at 150k points.
-const PCA_SAMPLE   = 2_000;  // vectors used to fit the PCA components
-const PCA_ITERS    = 30;     // power-iteration steps (enough for a sample)
+// Hard cap: each embedding is 1536 floats × 8 bytes = 12 KB.
+// 4 000 docs × 12 KB = 48 MB raw; PCA creates ~3× copies → ~150 MB peak. Safe for 512 MB instances.
+const MAX_DOCS     = 4_000;  // total embeddings loaded from DB
+const PCA_SAMPLE   = 1_500;  // vectors used to fit the PCA components
+const PCA_ITERS    = 20;     // power-iteration steps
 
 // ── Linear algebra helpers ────────────────────────────────────────────────────
 
@@ -130,11 +131,12 @@ function normalizeAxis(points: number[][], axis: number): number[] {
 export async function computeVectorMap(userId: string): Promise<VectorPoint[]> {
   const col  = await embeddingsCol();
 
-  // Load every embedding for this user.
-  // Exclude `text` — it can be MB per document. `preview` (≤160 chars) is enough for the UI.
+  // Load embeddings with a hard cap to prevent OOM on free-tier (512 MB RAM).
+  // Each embedding vector is 1536 floats × 8 bytes = ~12 KB; PCA creates ~3× copies.
   const docs = await col
     .find({ user_id: new ObjectId(userId) })
     .project({ name: 1, url: 1, type: 1, source: 1, section: 1, preview: 1, embedding: 1 })
+    .limit(MAX_DOCS)
     .toArray();
 
   if (docs.length === 0) {
@@ -153,7 +155,11 @@ export async function computeVectorMap(userId: string): Promise<VectorPoint[]> {
   console.log(`[VectorMap] ${valid.length} valid embeddings for user ${userId}:`, counts);
 
   const vectors   = valid.map((d) => d.embedding as number[]);
+  // Free raw doc data before PCA (keeps peak memory lower)
+  docs.length = 0;
   const projected = fitAndProject(vectors, 3);
+  // Free raw vectors after projection
+  vectors.length = 0;
 
   const xs = normalizeAxis(projected, 0);
   const ys = normalizeAxis(projected, 1);
