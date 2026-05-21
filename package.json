@@ -2,6 +2,9 @@
   "name": "cairo-backend-node",
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "dev:nodemon": "nodemon --exec tsx src/index.ts --ext ts",

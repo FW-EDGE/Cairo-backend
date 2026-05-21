@@ -86,17 +86,25 @@ wss.on("connection", (ws) => {
 
 // ── Startup ───────────────────────────────────────────────────────────────────
 async function start(): Promise<void> {
+  const port = parseInt(process.env.PORT ?? "7777", 10);
+
+  // Listen first — Railway health check must succeed quickly
+  await new Promise<void>((resolve) => {
+    server.listen(port, "0.0.0.0", () => {
+      console.log(`[CAIRO] Listening on http://0.0.0.0:${port}`);
+      resolve();
+    });
+  });
+
+  // MongoDB + background services (non-fatal if slow)
   try {
     await ensureIndexes();
     startHeartbeatMonitor();
     startScheduler();
-    const port = parseInt(process.env.PORT ?? "7777", 10);
-    server.listen(port, "0.0.0.0", () => {
-      console.log(`[CAIRO] Backend running on http://0.0.0.0:${port}`);
-    });
+    console.log("[CAIRO] All services started");
   } catch (err) {
-    console.error("[CAIRO] Startup error:", err);
-    process.exit(1);
+    console.error("[CAIRO] Post-listen startup error:", err);
+    // Don't exit — server is still listening, DB will reconnect
   }
 }
 
