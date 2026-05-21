@@ -1,4 +1,4 @@
-import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import { Router, Request, Response } from 'express';
 import {
   createOAuth2Client,
   getAuthUrl,
@@ -27,23 +27,18 @@ import { usersCol } from '../db/client.js';
 import { ObjectId } from 'mongodb';
 
 const IS_PROD = process.env.NODE_ENV === 'production';
+const router = Router();
 
-function setCairoTokenCookie(reply: FastifyReply, token: string): void {
-  reply.setCookie(COOKIE_NAME, token, {
+function setCairoTokenCookie(res: Response, token: string): void {
+  res.cookie(COOKIE_NAME, token, {
     httpOnly: true,
-    // Cross-origin (Vercel ↔ Railway): sameSite must be 'none' + secure.
-    // Locally both run on localhost so 'lax' is fine and secure isn't needed.
     sameSite: IS_PROD ? 'none' : 'lax',
-    secure:   IS_PROD,
+    secure: IS_PROD,
     path: '/',
-    maxAge: EXPIRE_DAYS * 86400,
+    maxAge: EXPIRE_DAYS * 86400 * 1000, // Express uses milliseconds
   });
 }
 
-/**
- * Shape expected by the frontend AuthContext AuthUser interface.
- * Maps _id → id and onboarding_completed → onboarding_complete.
- */
 function toFrontendUser(user: ReturnType<typeof serialize>) {
   if (!user) return null;
   const { _id, password_hash, google_tokens, onboarding_completed, ...rest } = user;
@@ -56,304 +51,217 @@ function toFrontendUser(user: ReturnType<typeof serialize>) {
   };
 }
 
-export async function authRoutes(fastify: FastifyInstance): Promise<void> {
+// GET /auth/google — start OAuth flow
+router.get('/auth/google', async (_req: Request, res: Response) => {
+  try {
+    const client = createOAuth2Client();
+    const { url, state } = getAuthUrl(client);
+    await saveOAuthState(state, { flow: 'login' });
+    res.cookie('oauth_state', state, { httpOnly: true, path: '/', maxAge: 600_000 });
+    res.redirect(url);
+  } catch (err) {
+    console.error('[Auth] /auth/google error:', err);
+    res.status(500).json({ error: 'Failed to initiate Google OAuth' });
+  }
+});
+
+// GET /auth/google/connect — connect Google to existing account
+router.get('/auth/google/connect', optionalUser, async (req: Request, res: Response) => {
   const config = getConfig();
-
-  // GET /auth/google — start OAuth flow
-  fastify.get('/auth/google', async (request: FastifyRequest, reply: FastifyReply) => {
-    try {
-      const client = createOAuth2Client();
-      const { url, state } = getAuthUrl(client);
-      await saveOAuthState(state, { flow: 'login' });
-
-      reply.setCookie('oauth_state', state, {
-        httpOnly: true,
-        path: '/',
-        maxAge: 600,
-      });
-
-      return reply.redirect(url);
-    } catch (err) {
-      console.error('[Auth] /auth/google error:', err);
-      return reply.status(500).send({ error: 'Failed to initiate Google OAuth' });
+  try {
+    if (!req.user) {
+      res.redirect(`${config.auth.frontend_url}/login?error=not_authenticated`);
+      return;
     }
-  });
+    const client = createOAuth2Client();
+    const { url, state } = getAuthUrl(client);
+    await saveOAuthState(state, { flow: 'connect', user_id: req.user._id });
+    res.cookie('oauth_state', state, { httpOnly: true, path: '/', maxAge: 600_000 });
+    res.redirect(url);
+  } catch (err) {
+    console.error('[Auth] /auth/google/connect error:', err);
+    res.redirect(`${config.auth.frontend_url}/login?error=connect_failed`);
+  }
+});
 
-  // GET /auth/google/connect — connect Google to existing account
-  fastify.get(
-    '/auth/google/connect',
-    { preHandler: optionalUser },
-    async (request: FastifyRequest, reply: FastifyReply) => {
-      try {
-        if (!request.user) {
-          return reply.redirect(`${config.auth.frontend_url}/login?error=not_authenticated`);
-        }
+// GET /auth/google/callback
+router.get('/auth/google/callback', async (req: Request, res: Response) => {
+  const config = getConfig();
+  const { code, state: queryState, error: oauthError } = req.query as Record<string, string>;
 
-        const client = createOAuth2Client();
-        const { url, state } = getAuthUrl(client);
-        await saveOAuthState(state, { flow: 'connect', user_id: request.user._id });
+  if (oauthError) { res.redirect(`${config.auth.frontend_url}/login?error=${oauthError}`); return; }
+  if (!code || !queryState) { res.redirect(`${config.auth.frontend_url}/login?error=missing_params`); return; }
 
-        reply.setCookie('oauth_state', state, {
-          httpOnly: true,
-          path: '/',
-          maxAge: 600,
-        });
+  const cookieState = req.cookies?.['oauth_state'];
+  if (!cookieState || cookieState !== queryState) {
+    res.redirect(`${config.auth.frontend_url}/login?error=state_mismatch`);
+    return;
+  }
 
-        return reply.redirect(url);
-      } catch (err) {
-        console.error('[Auth] /auth/google/connect error:', err);
-        return reply.redirect(`${config.auth.frontend_url}/login?error=connect_failed`);
-      }
-    }
-  );
+  const meta = await popOAuthState(queryState);
+  if (!meta) { res.redirect(`${config.auth.frontend_url}/login?error=invalid_state`); return; }
 
-  // GET /auth/google/callback
-  fastify.get('/auth/google/callback', async (request: FastifyRequest, reply: FastifyReply) => {
-    const query = request.query as Record<string, string>;
-    const { code, state: queryState, error: oauthError } = query;
-
-    if (oauthError) {
-      return reply.redirect(`${config.auth.frontend_url}/login?error=${oauthError}`);
+  try {
+    const { client, tokens } = await exchangeCode(code);
+    const googleUserInfo = await getUserInfo(client);
+    const storedTokens = clientToTokens(client);
+    if (tokens.expiry_date) {
+      storedTokens.expiry = new Date(tokens.expiry_date).toISOString();
     }
 
-    if (!code || !queryState) {
-      return reply.redirect(`${config.auth.frontend_url}/login?error=missing_params`);
-    }
-
-    // CSRF validation
-    const cookieState = request.cookies?.['oauth_state'];
-    if (!cookieState || cookieState !== queryState) {
-      return reply.redirect(`${config.auth.frontend_url}/login?error=state_mismatch`);
-    }
-
-    const meta = await popOAuthState(queryState);
-    if (!meta) {
-      return reply.redirect(`${config.auth.frontend_url}/login?error=invalid_state`);
-    }
-
-    try {
-      const { client, tokens } = await exchangeCode(code);
-      const googleUserInfo = await getUserInfo(client);
-      const storedTokens = clientToTokens(client);
-      // Include token expiry from raw credentials
-      if (tokens.expiry_date) {
-        storedTokens.expiry = new Date(tokens.expiry_date).toISOString();
-      }
-
-      if (meta.flow === 'connect' && meta.user_id) {
-        // Connect flow: link Google to existing account
-        const user = await connectGoogleUser(
-          meta.user_id as string,
-          storedTokens,
-          googleUserInfo.google_id,
-          googleUserInfo.picture
-        );
-
-        const token = createToken(user._id, user.email, user.tier);
-        setCairoTokenCookie(reply, token);
-        reply.clearCookie('oauth_state', { path: '/' });
-        return reply.redirect(`${config.auth.frontend_url}/onboarding?connected=true`);
-      } else {
-        // Login flow
-        const user = await upsertGoogleUser(
-          googleUserInfo.google_id,
-          googleUserInfo.email,
-          googleUserInfo.name,
-          googleUserInfo.picture,
-          storedTokens
-        );
-
-        const token = createToken(user._id, user.email, user.tier);
-        setCairoTokenCookie(reply, token);
-        reply.clearCookie('oauth_state', { path: '/' });
-        return reply.redirect(`${config.auth.frontend_url}/auth/callback`);
-      }
-    } catch (err) {
-      console.error('[Auth] callback error:', err);
-      reply.clearCookie('oauth_state', { path: '/' });
-      return reply.redirect(`${config.auth.frontend_url}/login?error=callback_failed`);
-    }
-  });
-
-  // GET /auth/me — returns user directly (frontend applies it as-is) or null
-  fastify.get(
-    '/auth/me',
-    { preHandler: optionalUser },
-    async (request: FastifyRequest, reply: FastifyReply) => {
-      if (!request.user) {
-        return reply.send(null);
-      }
-      return reply.send(toFrontendUser(request.user));
-    }
-  );
-
-  // POST /auth/register
-  fastify.post('/auth/register', async (request: FastifyRequest, reply: FastifyReply) => {
-    try {
-      const { name, email, password } = request.body as {
-        name?: string;
-        email: string;
-        password: string;
-      };
-
-      if (!email || !password) {
-        return reply.status(400).send({ error: 'email and password are required' });
-      }
-
-      if (password.length < 8) {
-        return reply.status(400).send({ error: 'Password must be at least 8 characters' });
-      }
-
-      const passwordHash = await hashPassword(password);
-
-      try {
-        const user = await createEmailUser(email, name ?? email.split('@')[0], passwordHash);
-        const token = createToken(user._id, user.email, user.tier);
-        setCairoTokenCookie(reply, token);
-        return reply.status(201).send(toFrontendUser(user));
-      } catch (createErr: unknown) {
-        const msg = createErr instanceof Error ? createErr.message : '';
-        if (!msg.includes('already exists')) throw createErr;
-
-        // Email exists — check if it's a Google-only account we can attach a password to
-        try {
-          const user = await attachPasswordToGoogleUser(email, passwordHash);
-          const token = createToken(user._id, user.email, user.tier);
-          setCairoTokenCookie(reply, token);
-          // 200 (not 201) to signal "existing account updated"
-          return reply.send({ ...toFrontendUser(user), password_attached: true });
-        } catch (attachErr: unknown) {
-          const attachMsg = attachErr instanceof Error ? attachErr.message : '';
-          if (attachMsg === 'already_has_password') {
-            return reply.status(409).send({ error: 'email_taken', message: 'An account with this email already exists. Try signing in.' });
-          }
-          // Not a Google account or other issue
-          return reply.status(409).send({ error: 'email_taken', message: 'An account with this email already exists. Try signing in.' });
-        }
-      }
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Registration failed';
-      return reply.status(500).send({ error: message });
-    }
-  });
-
-  // POST /auth/login
-  fastify.post('/auth/login', async (request: FastifyRequest, reply: FastifyReply) => {
-    try {
-      const { email, password } = request.body as { email: string; password: string };
-
-      if (!email || !password) {
-        return reply.status(400).send({ error: 'email and password are required' });
-      }
-
-      const user = await getUserByEmail(email);
-
-      // Account exists but was created via Google (no password set)
-      if (user && !user.password_hash) {
-        return reply.status(401).send({
-          error: 'google_only',
-          message: 'This account was created with Google. Please sign in with Google, or set a password first.',
-        });
-      }
-
-      if (!user) {
-        return reply.status(401).send({ error: 'invalid_credentials', message: 'Invalid email or password.' });
-      }
-
-      const valid = await verifyPassword(password, user.password_hash!);
-      if (!valid) {
-        return reply.status(401).send({ error: 'invalid_credentials', message: 'Invalid email or password.' });
-      }
-
+    if (meta.flow === 'connect' && meta.user_id) {
+      const user = await connectGoogleUser(
+        meta.user_id as string,
+        storedTokens,
+        googleUserInfo.google_id,
+        googleUserInfo.picture
+      );
       const token = createToken(user._id, user.email, user.tier);
-      setCairoTokenCookie(reply, token);
-      return reply.send(toFrontendUser(user));
-    } catch (err) {
-      console.error('[Auth] login error:', err);
-      return reply.status(500).send({ error: 'Login failed' });
+      setCairoTokenCookie(res, token);
+      res.clearCookie('oauth_state', { path: '/' });
+      res.redirect(`${config.auth.frontend_url}/onboarding?connected=true`);
+    } else {
+      const user = await upsertGoogleUser(
+        googleUserInfo.google_id,
+        googleUserInfo.email,
+        googleUserInfo.name,
+        googleUserInfo.picture,
+        storedTokens
+      );
+      const token = createToken(user._id, user.email, user.tier);
+      setCairoTokenCookie(res, token);
+      res.clearCookie('oauth_state', { path: '/' });
+      res.redirect(`${config.auth.frontend_url}/auth/callback`);
     }
-  });
+  } catch (err) {
+    console.error('[Auth] callback error:', err);
+    res.clearCookie('oauth_state', { path: '/' });
+    res.redirect(`${config.auth.frontend_url}/login?error=callback_failed`);
+  }
+});
 
-  // POST /auth/set-password — let a logged-in user set/change their password
-  fastify.post(
-    '/auth/set-password',
-    { preHandler: requireUser },
-    async (request: FastifyRequest, reply: FastifyReply) => {
+// GET /auth/me
+router.get('/auth/me', optionalUser, async (req: Request, res: Response) => {
+  if (!req.user) { res.json(null); return; }
+  res.json(toFrontendUser(req.user));
+});
+
+// POST /auth/register
+router.post('/auth/register', async (req: Request, res: Response) => {
+  try {
+    const { name, email, password } = req.body as { name?: string; email: string; password: string };
+    if (!email || !password) { res.status(400).json({ error: 'email and password are required' }); return; }
+    if (password.length < 8) { res.status(400).json({ error: 'Password must be at least 8 characters' }); return; }
+
+    const passwordHash = await hashPassword(password);
+    try {
+      const user = await createEmailUser(email, name ?? email.split('@')[0], passwordHash);
+      const token = createToken(user._id, user.email, user.tier);
+      setCairoTokenCookie(res, token);
+      res.status(201).json(toFrontendUser(user));
+    } catch (createErr: unknown) {
+      const msg = createErr instanceof Error ? createErr.message : '';
+      if (!msg.includes('already exists')) throw createErr;
       try {
-        const { password } = request.body as { password: string };
-        if (!password || password.length < 8) {
-          return reply.status(400).send({ error: 'Password must be at least 8 characters' });
+        const user = await attachPasswordToGoogleUser(email, passwordHash);
+        const token = createToken(user._id, user.email, user.tier);
+        setCairoTokenCookie(res, token);
+        res.json({ ...toFrontendUser(user), password_attached: true });
+      } catch (attachErr: unknown) {
+        const attachMsg = attachErr instanceof Error ? attachErr.message : '';
+        if (attachMsg === 'already_has_password') {
+          res.status(409).json({ error: 'email_taken', message: 'An account with this email already exists. Try signing in.' });
+          return;
         }
-        const hash = await hashPassword(password);
-        const col = await usersCol();
-        await col.updateOne(
-          { _id: new ObjectId(request.user!._id) },
-          { $set: { password_hash: hash } }
-        );
-        return reply.send({ ok: true });
-      } catch (err) {
-        console.error('[Auth] set-password error:', err);
-        return reply.status(500).send({ error: 'Failed to set password' });
+        res.status(409).json({ error: 'email_taken', message: 'An account with this email already exists. Try signing in.' });
       }
     }
-  );
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Registration failed';
+    res.status(500).json({ error: message });
+  }
+});
 
-  // POST /auth/logout
-  fastify.post('/auth/logout', async (_request: FastifyRequest, reply: FastifyReply) => {
-    reply.clearCookie(COOKIE_NAME, { path: '/' });
-    return reply.send({ ok: true });
-  });
+// POST /auth/login
+router.post('/auth/login', async (req: Request, res: Response) => {
+  try {
+    const { email, password } = req.body as { email: string; password: string };
+    if (!email || !password) { res.status(400).json({ error: 'email and password are required' }); return; }
 
-  // POST /auth/onboarding/complete
-  fastify.post(
-    '/auth/onboarding/complete',
-    { preHandler: requireUser },
-    async (request: FastifyRequest, reply: FastifyReply) => {
-      try {
-        await markOnboardingComplete(request.user!._id);
-        return reply.send({ ok: true });
-      } catch (err) {
-        console.error('[Auth] onboarding/complete error:', err);
-        return reply.status(500).send({ error: 'Failed to mark onboarding complete' });
-      }
+    const user = await getUserByEmail(email);
+    if (user && !user.password_hash) {
+      res.status(401).json({ error: 'google_only', message: 'This account was created with Google. Please sign in with Google, or set a password first.' });
+      return;
     }
-  );
+    if (!user) { res.status(401).json({ error: 'invalid_credentials', message: 'Invalid email or password.' }); return; }
 
-  // POST /auth/dev/reset-onboarding
-  fastify.post(
-    '/auth/dev/reset-onboarding',
-    { preHandler: requireUser },
-    async (request: FastifyRequest, reply: FastifyReply) => {
-      try {
-        const col = await usersCol();
-        await col.updateOne(
-          { _id: new ObjectId(request.user!._id) },
-          { $set: { onboarding_completed: false } }
-        );
-        return reply.send({ ok: true });
-      } catch (err) {
-        console.error('[Auth] reset-onboarding error:', err);
-        return reply.status(500).send({ error: 'Failed to reset onboarding' });
-      }
-    }
-  );
+    const valid = await verifyPassword(password, user.password_hash!);
+    if (!valid) { res.status(401).json({ error: 'invalid_credentials', message: 'Invalid email or password.' }); return; }
 
-  // POST /auth/dev/set-tier
-  fastify.post(
-    '/auth/dev/set-tier',
-    { preHandler: requireUser },
-    async (request: FastifyRequest, reply: FastifyReply) => {
-      try {
-        const { tier } = request.body as { tier: 'free' | 'pro' | 'business' };
-        if (!['free', 'pro', 'business'].includes(tier)) {
-          return reply.status(400).send({ error: 'Invalid tier' });
-        }
-        await setUserTier(request.user!._id, tier);
-        return reply.send({ ok: true, tier });
-      } catch (err) {
-        console.error('[Auth] set-tier error:', err);
-        return reply.status(500).send({ error: 'Failed to set tier' });
-      }
-    }
-  );
-}
+    const token = createToken(user._id, user.email, user.tier);
+    setCairoTokenCookie(res, token);
+    res.json(toFrontendUser(user));
+  } catch (err) {
+    console.error('[Auth] login error:', err);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+// POST /auth/set-password
+router.post('/auth/set-password', requireUser, async (req: Request, res: Response) => {
+  try {
+    const { password } = req.body as { password: string };
+    if (!password || password.length < 8) { res.status(400).json({ error: 'Password must be at least 8 characters' }); return; }
+    const hash = await hashPassword(password);
+    const col = await usersCol();
+    await col.updateOne({ _id: new ObjectId(req.user!._id) }, { $set: { password_hash: hash } });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Auth] set-password error:', err);
+    res.status(500).json({ error: 'Failed to set password' });
+  }
+});
+
+// POST /auth/logout
+router.post('/auth/logout', (_req: Request, res: Response) => {
+  res.clearCookie(COOKIE_NAME, { path: '/' });
+  res.json({ ok: true });
+});
+
+// POST /auth/onboarding/complete
+router.post('/auth/onboarding/complete', requireUser, async (req: Request, res: Response) => {
+  try {
+    await markOnboardingComplete(req.user!._id);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Auth] onboarding/complete error:', err);
+    res.status(500).json({ error: 'Failed to mark onboarding complete' });
+  }
+});
+
+// POST /auth/dev/reset-onboarding
+router.post('/auth/dev/reset-onboarding', requireUser, async (req: Request, res: Response) => {
+  try {
+    const col = await usersCol();
+    await col.updateOne({ _id: new ObjectId(req.user!._id) }, { $set: { onboarding_completed: false } });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Auth] reset-onboarding error:', err);
+    res.status(500).json({ error: 'Failed to reset onboarding' });
+  }
+});
+
+// POST /auth/dev/set-tier
+router.post('/auth/dev/set-tier', requireUser, async (req: Request, res: Response) => {
+  try {
+    const { tier } = req.body as { tier: 'free' | 'pro' | 'business' };
+    if (!['free', 'pro', 'business'].includes(tier)) { res.status(400).json({ error: 'Invalid tier' }); return; }
+    await setUserTier(req.user!._id, tier);
+    res.json({ ok: true, tier });
+  } catch (err) {
+    console.error('[Auth] set-tier error:', err);
+    res.status(500).json({ error: 'Failed to set tier' });
+  }
+});
+
+export default router;
