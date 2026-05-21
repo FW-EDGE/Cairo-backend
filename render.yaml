@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: cairo-backend
+    runtime: node
+    buildCommand: npm install && npm run build
+    startCommand: node dist/index.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
