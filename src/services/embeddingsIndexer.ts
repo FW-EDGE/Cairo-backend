@@ -5,7 +5,7 @@ import { createRequire } from 'module';
 
 import { embeddingsCol, driveCacheCol } from '../db/client.js';
 import { getConfig } from '../config.js';
-import { GoogleTokens, TIER_LIMITS, PaidTier } from '../db/users.js';
+import { GoogleTokens, TIER_LIMITS, Tier } from '../db/users.js';
 import { tokensToClient } from '../auth/google.js';
 import { DriveFile, saveDriveCache } from '../db/driveCache.js';
 import { mimeToType } from '../routes/drive.js';
@@ -132,123 +132,139 @@ export async function indexDriveForUser(
   const authClient = tokensToClient(googleTokens, userId);
   const drive = google.drive({ version: 'v3', auth: authClient });
   const col = await embeddingsCol();
+  const uid = new ObjectId(userId);
 
-  console.log(`[Embeddings] Full sync start for ${userId}...`);
   const allFiles = await fetchAllDriveFilesFlat(drive);
   await saveDriveCache(userId, allFiles, []).catch(() => {});
 
   const indexableFiles = allFiles.filter((f) => EXPORTABLE_MIMES[f.mimeType]);
-  console.log(`[Embeddings] Found ${allFiles.length} files total, ${indexableFiles.length} are indexable.`);
+  console.log(`[Embeddings] Drive: ${indexableFiles.length} indexable files found.`);
 
-  let processedCount = 0;
-  let totalChunksInserted = 0;
-  const CONCURRENCY     = 1;  // one file at a time — PDFs + large docs are RAM hogs
-  const SAVE_BATCH_SIZE = 5;  // flush currentDocs every 5 files
-  // Cap text per file: 20 000 chars ≈ 50 chunks of 400 words.
+  // ── Load already-indexed file IDs → their latest indexed_at ──────────────
+  const existingRaw = await col
+    .find({ user_id: uid, source: 'drive' })
+    .project({ file_id: 1, indexed_at: 1 })
+    .toArray();
+
+  // Map: file_id → most recent indexed_at for that file
+  const indexedMap = new Map<string, Date>();
+  for (const doc of existingRaw) {
+    if (!doc.file_id) continue;
+    const prev = indexedMap.get(doc.file_id as string);
+    const cur  = doc.indexed_at instanceof Date ? doc.indexed_at : new Date(doc.indexed_at);
+    if (!prev || cur > prev) indexedMap.set(doc.file_id as string, cur);
+  }
+
+  // ── Filter: only files that are new or modified since last index ──────────
+  const toIndex = indexableFiles.filter((file) => {
+    const lastIndexed = indexedMap.get(file.id);
+    if (!lastIndexed) return true; // never indexed
+    if (!file.modifiedTime) return false;
+    return new Date(file.modifiedTime) > lastIndexed; // modified since last index
+  });
+
+  const alreadyIndexed = indexableFiles.length - toIndex.length;
+  console.log(`[Embeddings] Drive: ${alreadyIndexed} up-to-date, ${toIndex.length} to index.`);
+  if (toIndex.length === 0) {
+    broadcastJson({ type: 'index_progress', userId, status: 'complete' });
+    return 0;
+  }
+
   const MAX_FILE_CHARS  = 20_000;
-  // Skip files larger than 10 MB — huge PDFs/spreadsheets will OOM the parser.
   const MAX_FILE_BYTES  = 10_000_000;
-
-  // Use a run-specific timestamp so we can delete OLD docs at the end
-  // without touching the new ones we just inserted.
-  const runStartedAt = new Date();
+  const MAX_STREAM_BYTES = MAX_FILE_CHARS * 4;
+  const SAVE_BATCH_SIZE = 5;
 
   let currentDocs: any[] = [];
-  let cappedEarly = false;
+  let processedCount    = 0;
+  let totalChunksInserted = 0;
 
-  for (let i = 0; i < indexableFiles.length; i += CONCURRENCY) {
-    const batch = indexableFiles.slice(i, i + CONCURRENCY);
+  // Keep track of which file IDs we're re-indexing so we can delete their old chunks
+  const reindexedFileIds: string[] = [];
 
-    await Promise.all(batch.map(async (file) => {
-      try {
-        // Skip files that are too large to parse safely in a 400 MB heap
-        const fileBytes = file.size ? parseInt(file.size, 10) : 0;
-        if (fileBytes > MAX_FILE_BYTES) {
-          console.log(`[Embeddings] Skipping "${file.name}" (${Math.round(fileBytes / 1_000_000)}MB > limit)`);
-          return;
-        }
-
-        let text = '';
-        const exportMime = EXPORTABLE_MIMES[file.mimeType];
-        // MAX_STREAM_BYTES: we stop downloading after this many bytes.
-        // At ~4 bytes/char, 80 000 bytes ≈ 20 000 chars ≈ 50 chunks of 400 words.
-        const MAX_STREAM_BYTES = MAX_FILE_CHARS * 4;
-
-        if (file.mimeType.startsWith('application/vnd.google-apps.')) {
-          // Google-native doc: stream the export and cut off after MAX_STREAM_BYTES
-          const res = await drive.files.export(
-            { fileId: file.id, mimeType: exportMime },
-            { responseType: 'stream' }
-          );
-          text = await streamToText(res.data as unknown as NodeJS.ReadableStream, MAX_STREAM_BYTES);
-        } else if (file.mimeType === 'application/pdf') {
-          // PDFs need a full buffer for pdf-parse; hard-cap at 3 MB so the parser
-          // never uses more than ~30 MB of heap (pdf-parse ≈ 10× raw size).
-          const MAX_PDF_BYTES = 3_000_000;
-          const pdfBytes = file.size ? parseInt(file.size, 10) : 0;
-          if (pdfBytes > MAX_PDF_BYTES) {
-            console.log(`[Embeddings] Skipping PDF "${file.name}" (${Math.round(pdfBytes / 1_000_000)}MB > 3MB PDF limit)`);
-          } else {
-            try {
-              const res = await drive.files.get(
-                { fileId: file.id, alt: 'media' },
-                { responseType: 'arraybuffer' }
-              );
-              const _require = createRequire(import.meta.url);
-              const pdfParse = _require('pdf-parse');
-              const data = await pdfParse(Buffer.from(res.data as ArrayBuffer));
-              text = (data.text || '').slice(0, MAX_FILE_CHARS);
-            } catch (err) {
-              console.warn(`[Embeddings] PDF parse failed for "${file.name}":`, err);
-            }
-          }
-        } else {
-          // Binary / plain-text: stream and cut off after MAX_STREAM_BYTES
-          const res = await drive.files.get(
-            { fileId: file.id, alt: 'media' },
-            { responseType: 'stream' }
-          );
-          text = await streamToText(res.data as unknown as NodeJS.ReadableStream, MAX_STREAM_BYTES);
-        }
-
-        if (text && text.trim().length > 20) {
-          const chunks = chunkText(text, 400);
-          chunks.forEach((chunk, idx) => {
-            currentDocs.push({
-              name: file.name,
-              url: file.webViewLink ?? '',
-              type: file.type || 'document',
-              section: `chunk_${idx}`,
-              text: chunk,
-            });
-          });
-        }
-      } catch (err: any) {
-        console.error(`[Embeddings] Error in ${file.name}: ${err.message}`);
+  for (let i = 0; i < toIndex.length; i++) {
+    const file = toIndex[i];
+    try {
+      const fileBytes = file.size ? parseInt(file.size, 10) : 0;
+      if (fileBytes > MAX_FILE_BYTES) {
+        console.log(`[Embeddings] Skipping "${file.name}" (${Math.round(fileBytes / 1_000_000)}MB > limit)`);
+        processedCount++;
+        continue;
       }
-    }));
 
-    processedCount += batch.length;
+      let text = '';
+      const exportMime = EXPORTABLE_MIMES[file.mimeType];
 
-    // Incremental save every SAVE_BATCH_SIZE files (or on last batch)
-    if (currentDocs.length > 0 && (processedCount % SAVE_BATCH_SIZE === 0 || processedCount >= indexableFiles.length)) {
+      if (file.mimeType.startsWith('application/vnd.google-apps.')) {
+        const res = await drive.files.export(
+          { fileId: file.id, mimeType: exportMime },
+          { responseType: 'stream' }
+        );
+        text = await streamToText(res.data as unknown as NodeJS.ReadableStream, MAX_STREAM_BYTES);
+      } else if (file.mimeType === 'application/pdf') {
+        const MAX_PDF_BYTES = 3_000_000;
+        const pdfBytes = file.size ? parseInt(file.size, 10) : 0;
+        if (pdfBytes > MAX_PDF_BYTES) {
+          console.log(`[Embeddings] Skipping PDF "${file.name}" (${Math.round(pdfBytes / 1_000_000)}MB > 3MB limit)`);
+        } else {
+          try {
+            const res = await drive.files.get(
+              { fileId: file.id, alt: 'media' },
+              { responseType: 'arraybuffer' }
+            );
+            const _require = createRequire(import.meta.url);
+            const pdfParse = _require('pdf-parse');
+            const data = await pdfParse(Buffer.from(res.data as ArrayBuffer));
+            text = (data.text || '').slice(0, MAX_FILE_CHARS);
+          } catch (err) {
+            console.warn(`[Embeddings] PDF parse failed for "${file.name}":`, err);
+          }
+        }
+      } else {
+        const res = await drive.files.get(
+          { fileId: file.id, alt: 'media' },
+          { responseType: 'stream' }
+        );
+        text = await streamToText(res.data as unknown as NodeJS.ReadableStream, MAX_STREAM_BYTES);
+      }
+
+      if (text && text.trim().length > 20) {
+        const chunks = chunkText(text, 400);
+        chunks.forEach((chunk, idx) => {
+          currentDocs.push({
+            file_id: file.id,
+            name:    file.name,
+            url:     file.webViewLink ?? '',
+            type:    file.type || 'document',
+            section: `chunk_${idx}`,
+            text:    chunk,
+          });
+        });
+        reindexedFileIds.push(file.id);
+      }
+    } catch (err: any) {
+      console.error(`[Embeddings] Error in "${file.name}": ${err.message}`);
+    }
+
+    processedCount++;
+
+    // Save every SAVE_BATCH_SIZE files or on the last one
+    if (currentDocs.length > 0 && (processedCount % SAVE_BATCH_SIZE === 0 || processedCount >= toIndex.length)) {
       try {
         const remaining = maxEmbeddings - totalChunksInserted;
         if (remaining <= 0) {
-          console.log(`[Embeddings] Drive cap reached (${maxEmbeddings}). Stopping early.`);
+          console.log(`[Embeddings] Drive cap reached (${maxEmbeddings}).`);
           currentDocs = [];
-          cappedEarly = true;
           break;
         }
         const docsToInsert = currentDocs.slice(0, remaining);
         const capped = docsToInsert.length < currentDocs.length;
 
-        console.log(`[Embeddings] Vectorizing batch: ${docsToInsert.length} chunks (Progress: ${processedCount}/${indexableFiles.length})${capped ? ' [cap reached]' : ''}`);
-
         const vectors = await batchEmbeddings(openai, docsToInsert.map(d => d.text));
-
+        const now = new Date();
         const embedDocs = docsToInsert.map((d, idx) => ({
-          user_id:    new ObjectId(userId),
+          user_id:    uid,
+          file_id:    d.file_id,
           name:       d.name,
           url:        d.url,
           type:       d.type,
@@ -257,50 +273,35 @@ export async function indexDriveForUser(
           text:       d.text,
           preview:    d.text.length > 160 ? d.text.slice(0, 160).trimEnd() + '…' : d.text,
           embedding:  vectors[idx],
-          indexed_at: new Date(), // AFTER runStartedAt → safe to keep
+          indexed_at: now,
         }));
 
-        if (embedDocs.length > 0) {
-          await col.insertMany(embedDocs);
-          totalChunksInserted += embedDocs.length;
-          console.log(`[Embeddings] Inserted ${embedDocs.length} chunks. Total: ${totalChunksInserted}/${maxEmbeddings}`);
+        // Delete OLD chunks only for the specific files being re-indexed
+        const fileIdsInBatch = [...new Set(docsToInsert.map(d => d.file_id))];
+        if (fileIdsInBatch.length > 0) {
+          await col.deleteMany({
+            user_id: uid,
+            source:  'drive',
+            file_id: { $in: fileIdsInBatch },
+            indexed_at: { $lt: now },
+          });
         }
 
-        if (capped) {
-          console.log(`[Embeddings] Drive embedding cap (${maxEmbeddings}) reached. Stopping.`);
-          currentDocs = [];
-          cappedEarly = true;
-          break;
-        }
+        await col.insertMany(embedDocs);
+        totalChunksInserted += embedDocs.length;
+        console.log(`[Embeddings] Drive: +${embedDocs.length} chunks (${processedCount}/${toIndex.length} files)`);
+
+        if (capped) { currentDocs = []; break; }
       } catch (saveErr: any) {
-        console.error(`[Embeddings] Critical Batch Save Error: ${saveErr.message}`);
+        console.error(`[Embeddings] Batch save error: ${saveErr.message}`);
       }
 
       currentDocs = [];
-
-      broadcastJson({
-        type: 'index_progress',
-        userId,
-        current: processedCount,
-        total: indexableFiles.length,
-        status: 'extracting',
-      });
+      broadcastJson({ type: 'index_progress', userId, current: processedCount, total: toIndex.length, status: 'drive' });
     }
   }
 
-  // ── Delete OLD drive embeddings ONLY after all new ones are safely inserted ──
-  // Docs inserted during this run have indexed_at >= runStartedAt.
-  // Old docs have indexed_at < runStartedAt.
-  if (totalChunksInserted > 0) {
-    const deleted = await col.deleteMany({
-      user_id: new ObjectId(userId),
-      source: 'drive',
-      indexed_at: { $lt: runStartedAt },
-    });
-    console.log(`[Embeddings] Removed ${deleted.deletedCount} stale Drive docs.`);
-  }
-
-  console.log(`[Embeddings] DRIVE SYNC COMPLETE. Total chunks: ${totalChunksInserted}`);
+  console.log(`[Embeddings] Drive sync complete. New chunks: ${totalChunksInserted}`);
   broadcastJson({ type: 'index_progress', userId, status: 'complete' });
   return totalChunksInserted;
 }
@@ -341,42 +342,54 @@ export async function indexGmailForUser(
   const authClient = tokensToClient(googleTokens, userId);
   const gmail = google.gmail({ version: 'v1', auth: authClient });
   const col = await embeddingsCol();
+  const uid = new ObjectId(userId);
 
-  // ── Paginate through ALL message IDs (Gmail API caps maxResults at 500/page) ──
-  const messages: Array<{ id: string }> = [];
+  // ── Load already-indexed message IDs ─────────────────────────────────────
+  const existingRaw = await col
+    .find({ user_id: uid, source: 'gmail' })
+    .project({ message_id: 1 })
+    .toArray();
+  const indexedMsgIds = new Set<string>(
+    existingRaw.map(d => String(d.message_id ?? '')).filter(Boolean)
+  );
+  console.log(`[Embeddings] Gmail: ${indexedMsgIds.size} messages already indexed.`);
+
+  // ── Paginate message IDs, stop once we have enough NEW ones ──────────────
+  const newMessages: Array<{ id: string }> = [];
   let pageToken: string | undefined;
   const PAGE_SIZE = 500;
 
-  console.log(`[Embeddings] Gmail: fetching up to ${maxEmails} message IDs…`);
   do {
     const res = await gmail.users.messages.list({
       userId: 'me',
-      maxResults: Math.min(PAGE_SIZE, maxEmails - messages.length),
+      maxResults: PAGE_SIZE,
       q: '-in:spam -in:trash',
       pageToken,
     });
     const batch = (res.data.messages ?? []) as Array<{ id: string }>;
-    messages.push(...batch);
+    for (const m of batch) {
+      if (!indexedMsgIds.has(m.id!)) newMessages.push(m);
+      if (newMessages.length >= maxEmails) break;
+    }
     pageToken = res.data.nextPageToken ?? undefined;
-    console.log(`[Embeddings] Gmail: fetched ${messages.length} IDs so far…`);
-  } while (pageToken && messages.length < maxEmails);
+    console.log(`[Embeddings] Gmail: ${newMessages.length} new IDs found so far…`);
+  } while (pageToken && newMessages.length < maxEmails);
 
-  console.log(`[Embeddings] Gmail: ${messages.length} messages to index`);
-  if (messages.length === 0) return 0;
+  console.log(`[Embeddings] Gmail: ${newMessages.length} new messages to index.`);
+  if (newMessages.length === 0) {
+    broadcastJson({ type: 'index_progress', userId, status: 'complete' });
+    return 0;
+  }
 
-  // ── Process in STREAMING batches: fetch → vectorize → save without accumulating all in RAM ──
-  // IMPORTANT: delete old data only AFTER we successfully insert the first new batch.
-  const FETCH_CONCURRENCY = 5;  // parallel Gmail API requests (conservative)
-  const EMBED_BATCH       = 50; // fetch + vectorize 50 at a time — ~5 MB max in RAM
-
+  // ── Process in streaming batches: fetch → vectorize → insert (never delete) ──
+  const FETCH_CONCURRENCY = 5;
+  const EMBED_BATCH       = 50;
   let totalInserted = 0;
-  let deletedOld    = false;
 
-  for (let i = 0; i < messages.length; i += EMBED_BATCH) {
-    const slice = messages.slice(i, i + EMBED_BATCH);
-    const emailDocs: Array<{ name: string; url: string; type: string; text: string }> = [];
+  for (let i = 0; i < newMessages.length; i += EMBED_BATCH) {
+    const slice = newMessages.slice(i, i + EMBED_BATCH);
+    const emailDocs: Array<{ message_id: string; name: string; url: string; text: string }> = [];
 
-    // Fetch slice in parallel sub-batches
     for (let j = 0; j < slice.length; j += FETCH_CONCURRENCY) {
       const subBatch = slice.slice(j, j + FETCH_CONCURRENCY);
       await Promise.all(subBatch.map(async (m) => {
@@ -392,9 +405,9 @@ export async function indexGmailForUser(
           const date    = headers.find((h: any) => h.name === 'Date')?.value ?? '';
           const body    = extractGmailBody(msg.data.payload) || (msg.data.snippet ?? '');
           emailDocs.push({
+            message_id: m.id!,
             name: subject,
             url:  `https://mail.google.com/mail/u/0/#inbox/${m.id}`,
-            type: 'email',
             text: `De: ${from}\nFecha: ${date}\nAsunto: ${subject}\n\n${body}`,
           });
         } catch { /* skip individual failures */ }
@@ -403,13 +416,13 @@ export async function indexGmailForUser(
 
     if (emailDocs.length === 0) continue;
 
-    // Vectorize this batch
     const vectors = await batchEmbeddings(openai, emailDocs.map((d) => d.text));
     const embedDocs = emailDocs.map((d, idx) => ({
-      user_id:    new ObjectId(userId),
+      user_id:    uid,
+      message_id: d.message_id,
       name:       d.name,
       url:        d.url,
-      type:       d.type,
+      type:       'email',
       source:     'gmail',
       text:       d.text,
       preview:    d.text.length > 160 ? d.text.slice(0, 160).trimEnd() + '…' : d.text,
@@ -417,49 +430,37 @@ export async function indexGmailForUser(
       indexed_at: new Date(),
     }));
 
-    // Only delete old Gmail embeddings AFTER the first batch is ready to replace them
-    if (!deletedOld) {
-      await col.deleteMany({ user_id: new ObjectId(userId), source: 'gmail' });
-      deletedOld = true;
-    }
-
+    // Pure insert — never delete existing emails
     await col.insertMany(embedDocs);
     totalInserted += embedDocs.length;
-    console.log(`[Embeddings] Gmail: saved ${totalInserted}/${messages.length} emails…`);
+    console.log(`[Embeddings] Gmail: +${embedDocs.length} (${totalInserted}/${newMessages.length} new)`);
 
-    broadcastJson({
-      type: 'index_progress',
-      userId,
-      current: totalInserted,
-      total: messages.length,
-      status: 'gmail',
-    });
+    broadcastJson({ type: 'index_progress', userId, current: totalInserted, total: newMessages.length, status: 'gmail' });
   }
 
-  console.log(`[Embeddings] Gmail indexing complete: ${totalInserted} emails indexed.`);
+  console.log(`[Embeddings] Gmail complete: ${totalInserted} new emails indexed.`);
   return totalInserted;
 }
 
 export async function runFullIndex(
   userId: string,
   googleTokens: GoogleTokens,
-  tier: PaidTier = 'pro'
-): Promise<{ drive: number; gmail: number; total: number; limits: typeof TIER_LIMITS[PaidTier] }> {
+  tier: Tier = 'free'
+): Promise<{ drive: number; gmail: number; total: number; limits: typeof TIER_LIMITS[Tier] }> {
   const limits = TIER_LIMITS[tier];
   console.log(`[Embeddings] Starting full index for user ${userId} (tier: ${tier}, drive cap: ${limits.maxDriveEmbeddings}, email cap: ${limits.maxEmails})`);
 
-  // Run Drive and Gmail in parallel — each fails independently so an OOM in one
-  // doesn't prevent the other from completing.
-  const [drive, gmail] = await Promise.all([
-    indexDriveForUser(userId, googleTokens, limits.maxDriveEmbeddings).catch((e) => {
-      console.error('[Embeddings] Drive sync FATAL error:', e);
-      return 0;
-    }),
-    indexGmailForUser(userId, googleTokens, limits.maxEmails).catch((e) => {
-      console.error('[Embeddings] Gmail sync FATAL error:', e);
-      return 0;
-    }),
-  ]);
+  // Gmail first — lighter, must complete before Drive potentially crashes.
+  const gmail = await indexGmailForUser(userId, googleTokens, limits.maxEmails).catch((e) => {
+    console.error('[Embeddings] Gmail sync FATAL error:', e);
+    return 0;
+  });
+
+  // Skip Drive entirely for free tier (cap = 0).
+  const drive = limits.maxDriveEmbeddings === 0 ? 0 : await indexDriveForUser(userId, googleTokens, limits.maxDriveEmbeddings).catch((e) => {
+    console.error('[Embeddings] Drive sync FATAL error:', e);
+    return 0;
+  });
 
   return { drive, gmail, total: drive + gmail, limits };
 }

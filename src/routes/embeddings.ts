@@ -3,7 +3,7 @@ import { ObjectId } from 'mongodb';
 import { requireUser } from '../auth/middleware.js';
 import { embeddingsCol } from '../db/client.js';
 import { runFullIndex } from '../services/embeddingsIndexer.js';
-import { TIER_LIMITS, Tier, PaidTier } from '../db/users.js';
+import { TIER_LIMITS, Tier } from '../db/users.js';
 
 const router = Router();
 
@@ -11,10 +11,9 @@ const router = Router();
 router.post('/embeddings/index', requireUser, async (req: Request, res: Response) => {
   try {
     const user = req.user!;
-    if (user.tier === 'free') { res.status(403).json({ error: 'Semantic indexing requires a Pro or Business plan' }); return; }
     if (!user.google_tokens) { res.status(403).json({ error: 'Google account not connected' }); return; }
 
-    const tier = user.tier as PaidTier;
+    const tier = (user.tier ?? 'free') as Tier;
     const limits = TIER_LIMITS[tier];
 
     setImmediate(async () => {
@@ -47,8 +46,8 @@ router.get('/embeddings/status', requireUser, async (req: Request, res: Response
     let total = 0;
     for (const r of results) { counts[r._id as string] = r.count as number; total += r.count as number; }
     const tier = (user.tier ?? 'free') as Tier;
-    const limits = tier !== 'free' ? TIER_LIMITS[tier as PaidTier] : null;
-    const maxTotal = limits ? limits.maxDriveEmbeddings + limits.maxEmails : 0;
+    const limits = TIER_LIMITS[tier];
+    const maxTotal = limits.maxDriveEmbeddings + limits.maxEmails;
     res.json({ counts, total, tier, limits, maxTotal });
   } catch (err) {
     console.error('[Embeddings] GET /embeddings/status error:', err);

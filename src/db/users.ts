@@ -3,12 +3,13 @@ import { usersCol } from './client.js';
 
 // ─── Tier limits ────────────────────────────────────────────────────────────
 export const TIER_LIMITS = {
-  pro:      { maxDriveEmbeddings: 20_000,  maxEmails: 5_000  },
-  business: { maxDriveEmbeddings: 150_000, maxEmails: 20_000 },
+  free:     { maxDriveEmbeddings: 0,       maxEmails: 50     },
+  pro:      { maxDriveEmbeddings: 20_000,  maxEmails: 500    },
+  business: { maxDriveEmbeddings: 150_000, maxEmails: 5_000  },
 } as const;
 
-export type Tier = 'free' | 'pro' | 'business';
-export type PaidTier = keyof typeof TIER_LIMITS;
+export type Tier = keyof typeof TIER_LIMITS;
+export type PaidTier = 'pro' | 'business';
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface GoogleTokens {
