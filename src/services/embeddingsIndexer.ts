@@ -34,14 +34,23 @@ function chunkText(text: string, chunkSize = 400): string[] {
   return chunks.filter((c) => c.trim().length > 20); // Only chunks with meaningful length
 }
 
+// text-embedding-3-small: max 8,191 tokens per input, 300,000 tokens per batch request.
+// At ~4 chars/token, 6,000 chars ≈ 1,500 tokens — safe per-input ceiling.
+// With BATCH_SIZE=50: 50 × 1,500 = 75,000 tokens max per request — well under the 300k limit.
+const MAX_CHARS_PER_TEXT = 6_000;
+const EMBED_BATCH_SIZE   = 50;
+
+function truncateForEmbedding(text: string): string {
+  return text.length > MAX_CHARS_PER_TEXT ? text.slice(0, MAX_CHARS_PER_TEXT) : text;
+}
+
 async function batchEmbeddings(
   openai: OpenAI,
   texts: string[]
 ): Promise<number[][]> {
   const allVectors: number[][] = [];
-  const BATCH_SIZE = 100;
-  for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-    const batch = texts.slice(i, i + BATCH_SIZE);
+  for (let i = 0; i < texts.length; i += EMBED_BATCH_SIZE) {
+    const batch = texts.slice(i, i + EMBED_BATCH_SIZE).map(truncateForEmbedding);
     try {
       const res = await openai.embeddings.create({
         model: 'text-embedding-3-small',
@@ -50,7 +59,7 @@ async function batchEmbeddings(
       allVectors.push(...res.data.map((d) => d.embedding));
     } catch (err: any) {
       console.error(`[Embeddings] OpenAI Batch Error: ${err.message}`);
-      // Return zero-vectors for this batch to avoid failing the whole process
+      // Return zero-vectors for this batch so the rest of indexing continues
       allVectors.push(...batch.map(() => new Array(1536).fill(0)));
     }
   }
@@ -110,26 +119,30 @@ export async function indexDriveForUser(
 
   let processedCount = 0;
   let totalChunksInserted = 0;
-  const CONCURRENCY = 5; // Even lower concurrency for better stability
-  const SAVE_BATCH_SIZE = 20; // Smaller batches for more frequent updates
-  
+  const CONCURRENCY   = 5;
+  const SAVE_BATCH_SIZE = 20;
+
+  // Use a run-specific timestamp so we can delete OLD docs at the end
+  // without touching the new ones we just inserted.
+  const runStartedAt = new Date();
+
   let currentDocs: any[] = [];
+  let cappedEarly = false;
 
   for (let i = 0; i < indexableFiles.length; i += CONCURRENCY) {
     const batch = indexableFiles.slice(i, i + CONCURRENCY);
-    
+
     await Promise.all(batch.map(async (file) => {
       try {
         let text = '';
         const exportMime = EXPORTABLE_MIMES[file.mimeType];
-        
+
         if (file.mimeType.startsWith('application/vnd.google-apps.')) {
           const res = await drive.files.export({ fileId: file.id, mimeType: exportMime }, { responseType: 'text' });
           text = res.data as string;
         } else if (file.mimeType === 'application/pdf') {
           const res = await drive.files.get({ fileId: file.id, alt: 'media' }, { responseType: 'arraybuffer' });
           try {
-            // Lazy-load pdf-parse (1.1.1) so a broken install never crashes startup
             const _require = createRequire(import.meta.url);
             const pdfParse = _require('pdf-parse');
             const data = await pdfParse(Buffer.from(res.data as ArrayBuffer));
@@ -143,7 +156,7 @@ export async function indexDriveForUser(
         }
 
         if (text && text.trim().length > 20) {
-          const chunks = chunkText(text, 500);
+          const chunks = chunkText(text, 400);
           chunks.forEach((chunk, idx) => {
             currentDocs.push({
               name: file.name,
@@ -161,14 +174,14 @@ export async function indexDriveForUser(
 
     processedCount += batch.length;
 
-    // Incremental save
+    // Incremental save every SAVE_BATCH_SIZE files (or on last batch)
     if (currentDocs.length > 0 && (processedCount % SAVE_BATCH_SIZE === 0 || processedCount >= indexableFiles.length)) {
       try {
-        // Enforce tier cap: trim currentDocs to not exceed remaining capacity
         const remaining = maxEmbeddings - totalChunksInserted;
         if (remaining <= 0) {
           console.log(`[Embeddings] Drive cap reached (${maxEmbeddings}). Stopping early.`);
           currentDocs = [];
+          cappedEarly = true;
           break;
         }
         const docsToInsert = currentDocs.slice(0, remaining);
@@ -176,27 +189,22 @@ export async function indexDriveForUser(
 
         console.log(`[Embeddings] Vectorizing batch: ${docsToInsert.length} chunks (Progress: ${processedCount}/${indexableFiles.length})${capped ? ' [cap reached]' : ''}`);
 
-        const texts = docsToInsert.map(d => d.text);
-        const vectors = await batchEmbeddings(openai, texts);
+        const vectors = await batchEmbeddings(openai, docsToInsert.map(d => d.text));
 
         const embedDocs = docsToInsert.map((d, idx) => ({
-          user_id: new ObjectId(userId),
-          name: d.name,
-          url: d.url,
-          type: d.type,
-          source: 'drive',
-          section: d.section,
-          text: d.text,
-          preview: d.text.length > 160 ? d.text.slice(0, 160).trimEnd() + '…' : d.text,
-          embedding: vectors[idx],
-          indexed_at: new Date(),
+          user_id:    new ObjectId(userId),
+          name:       d.name,
+          url:        d.url,
+          type:       d.type,
+          source:     'drive',
+          section:    d.section,
+          text:       d.text,
+          preview:    d.text.length > 160 ? d.text.slice(0, 160).trimEnd() + '…' : d.text,
+          embedding:  vectors[idx],
+          indexed_at: new Date(), // AFTER runStartedAt → safe to keep
         }));
 
         if (embedDocs.length > 0) {
-          // Clean old data ONLY if we have new data to replace it (on first successful batch)
-          if (totalChunksInserted === 0) {
-            await col.deleteMany({ user_id: new ObjectId(userId), source: 'drive' });
-          }
           await col.insertMany(embedDocs);
           totalChunksInserted += embedDocs.length;
           console.log(`[Embeddings] Inserted ${embedDocs.length} chunks. Total: ${totalChunksInserted}/${maxEmbeddings}`);
@@ -205,22 +213,35 @@ export async function indexDriveForUser(
         if (capped) {
           console.log(`[Embeddings] Drive embedding cap (${maxEmbeddings}) reached. Stopping.`);
           currentDocs = [];
+          cappedEarly = true;
           break;
         }
       } catch (saveErr: any) {
         console.error(`[Embeddings] Critical Batch Save Error: ${saveErr.message}`);
       }
-      
-      currentDocs = []; // Reset for next batch
-      
+
+      currentDocs = [];
+
       broadcastJson({
         type: 'index_progress',
         userId,
         current: processedCount,
         total: indexableFiles.length,
-        status: 'extracting'
+        status: 'extracting',
       });
     }
+  }
+
+  // ── Delete OLD drive embeddings ONLY after all new ones are safely inserted ──
+  // Docs inserted during this run have indexed_at >= runStartedAt.
+  // Old docs have indexed_at < runStartedAt.
+  if (totalChunksInserted > 0) {
+    const deleted = await col.deleteMany({
+      user_id: new ObjectId(userId),
+      source: 'drive',
+      indexed_at: { $lt: runStartedAt },
+    });
+    console.log(`[Embeddings] Removed ${deleted.deletedCount} stale Drive docs.`);
   }
 
   console.log(`[Embeddings] DRIVE SYNC COMPLETE. Total chunks: ${totalChunksInserted}`);
@@ -265,17 +286,16 @@ export async function indexGmailForUser(
   const gmail = google.gmail({ version: 'v1', auth: authClient });
   const col = await embeddingsCol();
 
-  // ── Paginate through ALL emails (Gmail API caps maxResults at 500 per page) ──
+  // ── Paginate through ALL message IDs (Gmail API caps maxResults at 500/page) ──
   const messages: Array<{ id: string }> = [];
   let pageToken: string | undefined;
-  const PAGE_SIZE = 500; // Gmail API maximum per page
+  const PAGE_SIZE = 500;
 
   console.log(`[Embeddings] Gmail: fetching up to ${maxEmails} message IDs…`);
   do {
     const res = await gmail.users.messages.list({
       userId: 'me',
       maxResults: Math.min(PAGE_SIZE, maxEmails - messages.length),
-      // All mail except spam and trash — covers inbox, sent, starred, etc.
       q: '-in:spam -in:trash',
       pageToken,
     });
@@ -288,53 +308,48 @@ export async function indexGmailForUser(
   console.log(`[Embeddings] Gmail: ${messages.length} messages to index`);
   if (messages.length === 0) return 0;
 
-  // ── Fetch each message with full payload for body extraction ──────────────
-  const emailDocs: any[] = [];
-  const CONCURRENCY = 8; // conservative to avoid Gmail API rate limits
+  // ── Process in STREAMING batches: fetch → vectorize → save without accumulating all in RAM ──
+  // IMPORTANT: delete old data only AFTER we successfully insert the first new batch.
+  const FETCH_CONCURRENCY = 5;  // parallel Gmail API requests (conservative)
+  const EMBED_BATCH       = 50; // fetch + vectorize 50 at a time — ~5 MB max in RAM
 
-  for (let i = 0; i < messages.length; i += CONCURRENCY) {
-    const batch = messages.slice(i, i + CONCURRENCY);
-    await Promise.all(batch.map(async (m) => {
-      try {
-        const msg = await gmail.users.messages.get({
-          userId: 'me',
-          id: m.id!,
-          format: 'full', // full payload so we can extract body text
-        });
-        const headers = msg.data.payload?.headers ?? [];
-        const subject = headers.find((h: any) => h.name === 'Subject')?.value ?? '(Sin asunto)';
-        const from    = headers.find((h: any) => h.name === 'From')?.value ?? '';
-        const date    = headers.find((h: any) => h.name === 'Date')?.value ?? '';
-
-        // Try to get body text; fall back to snippet
-        const body = extractGmailBody(msg.data.payload) || (msg.data.snippet ?? '');
-
-        const text = `De: ${from}\nFecha: ${date}\nAsunto: ${subject}\n\n${body}`;
-        emailDocs.push({
-          name: subject,
-          url:  `https://mail.google.com/mail/u/0/#inbox/${m.id}`,
-          type: 'email',
-          text,
-        });
-      } catch { /* skip individual failures */ }
-    }));
-
-    if (i % 200 === 0 && i > 0) {
-      console.log(`[Embeddings] Gmail: fetched content for ${i}/${messages.length} messages…`);
-    }
-  }
-
-  if (emailDocs.length === 0) return 0;
-
-  // ── Vectorize in batches and save ─────────────────────────────────────────
-  const EMBED_BATCH = 200;
-  await col.deleteMany({ user_id: new ObjectId(userId), source: 'gmail' });
   let totalInserted = 0;
+  let deletedOld    = false;
 
-  for (let i = 0; i < emailDocs.length; i += EMBED_BATCH) {
-    const batch = emailDocs.slice(i, i + EMBED_BATCH);
-    const vectors = await batchEmbeddings(openai, batch.map((d: any) => d.text));
-    const embedDocs = batch.map((d: any, idx: number) => ({
+  for (let i = 0; i < messages.length; i += EMBED_BATCH) {
+    const slice = messages.slice(i, i + EMBED_BATCH);
+    const emailDocs: Array<{ name: string; url: string; type: string; text: string }> = [];
+
+    // Fetch slice in parallel sub-batches
+    for (let j = 0; j < slice.length; j += FETCH_CONCURRENCY) {
+      const subBatch = slice.slice(j, j + FETCH_CONCURRENCY);
+      await Promise.all(subBatch.map(async (m) => {
+        try {
+          const msg = await gmail.users.messages.get({
+            userId: 'me',
+            id: m.id!,
+            format: 'full',
+          });
+          const headers = msg.data.payload?.headers ?? [];
+          const subject = headers.find((h: any) => h.name === 'Subject')?.value ?? '(Sin asunto)';
+          const from    = headers.find((h: any) => h.name === 'From')?.value ?? '';
+          const date    = headers.find((h: any) => h.name === 'Date')?.value ?? '';
+          const body    = extractGmailBody(msg.data.payload) || (msg.data.snippet ?? '');
+          emailDocs.push({
+            name: subject,
+            url:  `https://mail.google.com/mail/u/0/#inbox/${m.id}`,
+            type: 'email',
+            text: `De: ${from}\nFecha: ${date}\nAsunto: ${subject}\n\n${body}`,
+          });
+        } catch { /* skip individual failures */ }
+      }));
+    }
+
+    if (emailDocs.length === 0) continue;
+
+    // Vectorize this batch
+    const vectors = await batchEmbeddings(openai, emailDocs.map((d) => d.text));
+    const embedDocs = emailDocs.map((d, idx) => ({
       user_id:    new ObjectId(userId),
       name:       d.name,
       url:        d.url,
@@ -345,9 +360,24 @@ export async function indexGmailForUser(
       embedding:  vectors[idx],
       indexed_at: new Date(),
     }));
+
+    // Only delete old Gmail embeddings AFTER the first batch is ready to replace them
+    if (!deletedOld) {
+      await col.deleteMany({ user_id: new ObjectId(userId), source: 'gmail' });
+      deletedOld = true;
+    }
+
     await col.insertMany(embedDocs);
     totalInserted += embedDocs.length;
-    console.log(`[Embeddings] Gmail: vectorized and saved ${totalInserted}/${emailDocs.length}`);
+    console.log(`[Embeddings] Gmail: saved ${totalInserted}/${messages.length} emails…`);
+
+    broadcastJson({
+      type: 'index_progress',
+      userId,
+      current: totalInserted,
+      total: messages.length,
+      status: 'gmail',
+    });
   }
 
   console.log(`[Embeddings] Gmail indexing complete: ${totalInserted} emails indexed.`);
