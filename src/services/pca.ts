@@ -13,17 +13,16 @@ export interface VectorPoint {
   z: number;
 }
 
-// Memory budget (Render, 460 MB heap cap):
-//   15 000 × 1536 floats × 4 B = ~92 MB vectors
-//   + MongoDB doc overhead during fetch ≈ 180 MB peak
-//   + PCA sample (1 000 rows) ≈ 6 MB
-//   + Node overhead ≈ 100 MB
-//   Total ≈ 286 MB — fits within the 460 MB limit.
-//   PCA_SAMPLE stays at 1 000: more than enough to capture principal components
-//   even for 15k points (law of large numbers kicks in well before that).
-const MAX_DOCS   = 15_000;
-const PCA_SAMPLE = 1_000;
-const PCA_ITERS  = 20;
+// Memory budget — new streaming approach:
+//   Phase 1 sample: 1 000 × 1 536 × 4 B ≈  6 MB
+//   Phase 2 cursor batch: 500 × 1 536 × 4 B ≈  3 MB  (released after each batch)
+//   Phase 3 projected3D: 15 000 × 3 × 4 B ≈  0.2 MB
+//   Node overhead ≈ 100 MB
+//   Total peak ≈ ~110 MB — well within 460 MB limit.
+const MAX_DOCS     = 15_000;
+const PCA_SAMPLE   =  1_000;
+const PCA_ITERS    =     20;
+const STREAM_BATCH =    500;  // docs projected per iteration in Phase 2
 
 // ── Linear algebra helpers ────────────────────────────────────────────────────
 
@@ -42,12 +41,10 @@ function normalize(v: number[]): number[] {
   return n === 0 ? v.map(() => 0) : v.map((x) => x / n);
 }
 
-/** X·v  (returns new N-length array — small, OK) */
 function matVecMul(X: number[][], v: number[]): number[] {
   return X.map((row) => dotProduct(row, v));
 }
 
-/** Xᵀ·v  (returns new D-length array — small, OK) */
 function matTransVecMul(X: number[][], v: number[]): number[] {
   if (X.length === 0) return [];
   const cols = X[0].length;
@@ -57,12 +54,9 @@ function matTransVecMul(X: number[][], v: number[]): number[] {
   return r;
 }
 
-/**
- * Deflate IN PLACE — removes variance along `pc` from every row of X.
- * Avoids the 3 × 18 MB extra allocations that killed the original version.
- */
+/** Removes variance along `pc` from every row of X — in place. */
 function deflateInPlace(X: number[][], pc: number[]): void {
-  const scores = matVecMul(X, pc); // small N-length array
+  const scores = matVecMul(X, pc);
   for (let i = 0; i < X.length; i++) {
     const s = scores[i];
     for (let j = 0; j < X[i].length; j++) X[i][j] -= s * pc[j];
@@ -82,67 +76,6 @@ function powerIteration(X: number[][], iters = PCA_ITERS): number[] {
   return v;
 }
 
-/**
- * Copy a subsample and center it IN PLACE.
- * Returns { sample (centered copy), mean }.
- * One copy of PCA_SAMPLE rows — the only allocation during fitting.
- */
-function copyCenterSubsample(
-  vectors: number[][],
-  n: number,
-): { sample: number[][]; mean: number[] } {
-  const total = vectors.length;
-  const size  = Math.min(n, total);
-  const step  = total / size;
-
-  // Deep-copy the subsample rows so we can mutate without touching original vectors
-  const sample: number[][] = Array.from(
-    { length: size },
-    (_, i) => vectors[Math.floor(i * step)].slice(),
-  );
-
-  // Compute mean across sample rows
-  const cols = sample[0].length;
-  const mean = new Array<number>(cols).fill(0);
-  for (const row of sample) for (let j = 0; j < cols; j++) mean[j] += row[j];
-  for (let j = 0; j < cols; j++) mean[j] /= size;
-
-  // Center in-place
-  for (const row of sample) for (let j = 0; j < cols; j++) row[j] -= mean[j];
-
-  return { sample, mean };
-}
-
-/**
- * Fit PCA on a subsample, then project ALL vectors.
- * Peak extra allocation: one PCA_SAMPLE × D copy (≈18 MB). No more.
- */
-function fitAndProject(vectors: number[][], components = 3): number[][] {
-  if (vectors.length < 2) return vectors.map(() => [0, 0, 0]);
-
-  const { sample, mean } = copyCenterSubsample(vectors, PCA_SAMPLE);
-
-  // Extract principal components (in-place deflation — no extra large allocations)
-  const pcs: number[][] = [];
-  for (let k = 0; k < components; k++) {
-    if (!sample[0]?.length) break;
-    const pc = powerIteration(sample);
-    pcs.push(pc);
-    deflateInPlace(sample, pc);
-  }
-
-  // sample can be GC'd now
-  (sample as unknown as null[]).length = 0;
-
-  if (pcs.length === 0) return vectors.map(() => [0, 0, 0]);
-
-  // Project every vector: center with sample mean, dot with each PC
-  return vectors.map((row) => {
-    const c = row.map((v, j) => v - mean[j]); // one temporary row at a time
-    return pcs.map((pc) => dotProduct(c, pc));
-  });
-}
-
 function normalizeAxis(points: number[][], axis: number): number[] {
   const vals  = points.map((p) => p[axis]);
   const min   = Math.min(...vals);
@@ -156,47 +89,99 @@ function normalizeAxis(points: number[][], axis: number): number[] {
 export async function computeVectorMap(userId: string): Promise<VectorPoint[]> {
   const col = await embeddingsCol();
 
-  const docs = await col
+  // ── Phase 1: load a small sample to fit PCA ───────────────────────────────
+  // Only PCA_SAMPLE docs are fully loaded into RAM here (~6 MB).
+  const sampleDocs = await col
     .find({ user_id: new ObjectId(userId) })
-    .project({ name: 1, url: 1, type: 1, source: 1, section: 1, preview: 1, embedding: 1 })
-    .limit(MAX_DOCS)
+    .project({ embedding: 1 })
+    .limit(PCA_SAMPLE)
     .toArray();
 
-  if (docs.length === 0) {
-    console.log(`[VectorMap] No embeddings for user ${userId}`);
+  const sampleVectors = sampleDocs
+    .filter((d) => Array.isArray(d.embedding) && (d.embedding as number[]).length > 0)
+    .map((d) => d.embedding as number[]);
+
+  (sampleDocs as unknown[]).length = 0; // release doc objects early
+
+  if (sampleVectors.length < 2) {
+    console.log(`[VectorMap] Not enough embeddings for user ${userId}`);
     return [];
   }
 
-  const valid = docs.filter(
-    (d) => Array.isArray(d.embedding) && (d.embedding as number[]).length > 0,
-  );
-  docs.length = 0; // release raw docs array early
+  const dims = sampleVectors[0].length;
 
+  // Center sample and compute mean vector
+  const mean = new Array<number>(dims).fill(0);
+  for (const row of sampleVectors) for (let j = 0; j < dims; j++) mean[j] += row[j];
+  for (let j = 0; j < dims; j++) mean[j] /= sampleVectors.length;
+  for (const row of sampleVectors) for (let j = 0; j < dims; j++) row[j] -= mean[j];
+
+  // Extract 3 principal components via power iteration on centered sample
+  const pcs: number[][] = [];
+  for (let k = 0; k < 3; k++) {
+    if (!sampleVectors[0]?.length) break;
+    const pc = powerIteration(sampleVectors);
+    pcs.push(pc);
+    deflateInPlace(sampleVectors, pc);
+  }
+  (sampleVectors as unknown[]).length = 0; // free sample — PCs are all we need now
+
+  if (pcs.length === 0) return [];
+
+  // ── Phase 2: stream all docs via cursor, project in batches ──────────────
+  // Peak RAM for this phase: STREAM_BATCH × 1536 × 4B ≈ 3 MB at any one time.
+  // Projected 3D coords are tiny (3 floats) — collected for normalization in Phase 3.
+  const projected3D: number[][] = [];
+  const metadataArr: Omit<VectorPoint, 'x' | 'y' | 'z'>[] = [];
+
+  const cursor = col
+    .find({ user_id: new ObjectId(userId) })
+    .project({ name: 1, url: 1, type: 1, source: 1, section: 1, preview: 1, embedding: 1 })
+    .limit(MAX_DOCS)
+    .batchSize(STREAM_BATCH);
+
+  let batchVecs: number[][] = [];
+  let batchMeta: Omit<VectorPoint, 'x' | 'y' | 'z'>[] = [];
   const counts: Record<string, number> = {};
-  valid.forEach((d) => {
-    const src = String(d.source ?? 'unknown');
-    counts[src] = (counts[src] || 0) + 1;
-  });
-  console.log(`[VectorMap] ${valid.length} embeddings for user ${userId}:`, counts);
 
-  // Separate metadata (tiny) from vectors (large) so we can free vectors post-PCA
-  const metadata = valid.map((d) => ({
-    name:    String(d.name    ?? ''),
-    url:     String(d.url     ?? ''),
-    type:    String(d.type    ?? ''),
-    source:  String(d.source  ?? ''),
-    section: String(d.section ?? ''),
-    preview: String(d.preview ?? ''),
-  }));
-  const vectors = valid.map((d) => d.embedding as number[]);
-  valid.length = 0; // release doc objects (embedding refs still alive via vectors)
+  const flushBatch = () => {
+    for (let i = 0; i < batchVecs.length; i++) {
+      const c = batchVecs[i].map((v, j) => v - mean[j]); // center
+      projected3D.push(pcs.map((pc) => dotProduct(c, pc)));
+      metadataArr.push(batchMeta[i]);
+    }
+    batchVecs = [];
+    batchMeta = [];
+  };
 
-  const projected = fitAndProject(vectors, 3);
-  vectors.length = 0; // release ~N × 12 KB of embedding data
+  for await (const doc of cursor) {
+    if (!Array.isArray(doc.embedding) || (doc.embedding as number[]).length === 0) continue;
 
-  const xs = normalizeAxis(projected, 0);
-  const ys = normalizeAxis(projected, 1);
-  const zs = normalizeAxis(projected, 2);
+    const src = String(doc.source ?? 'unknown');
+    counts[src] = (counts[src] ?? 0) + 1;
 
-  return metadata.map((m, i) => ({ ...m, x: xs[i], y: ys[i], z: zs[i] }));
+    batchVecs.push(doc.embedding as number[]);
+    batchMeta.push({
+      name:    String(doc.name    ?? ''),
+      url:     String(doc.url     ?? ''),
+      type:    String(doc.type    ?? ''),
+      source:  src,
+      section: String(doc.section ?? ''),
+      preview: String(doc.preview ?? ''),
+    });
+
+    if (batchVecs.length >= STREAM_BATCH) flushBatch();
+  }
+  flushBatch(); // remaining docs
+
+  console.log(`[VectorMap] ${metadataArr.length} embeddings for user ${userId}:`, counts);
+
+  if (metadataArr.length === 0) return [];
+
+  // ── Phase 3: normalize 3D coords across all projected points (tiny data) ──
+  const xs = normalizeAxis(projected3D, 0);
+  const ys = normalizeAxis(projected3D, 1);
+  const zs = normalizeAxis(projected3D, 2);
+
+  return metadataArr.map((m, i) => ({ ...m, x: xs[i], y: ys[i], z: zs[i] }));
 }
