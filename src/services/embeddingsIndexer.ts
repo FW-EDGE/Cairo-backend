@@ -143,16 +143,25 @@ export async function indexDriveForUser(
   // ── Load already-indexed file IDs → their latest indexed_at ──────────────
   const existingRaw = await col
     .find({ user_id: uid, source: 'drive' })
-    .project({ file_id: 1, indexed_at: 1 })
+    .project({ file_id: 1, url: 1, indexed_at: 1 })
     .toArray();
 
   // Map: file_id → most recent indexed_at for that file
+  // Old docs may not have file_id — extract it from the Google Drive URL as fallback.
+  // Drive URLs look like: https://docs.google.com/document/d/FILE_ID/edit
+  //                   or: https://drive.google.com/file/d/FILE_ID/view
+  function fileIdFromUrl(url: string): string {
+    const m = url.match(/\/d\/([a-zA-Z0-9_-]{10,})/);
+    return m ? m[1] : '';
+  }
+
   const indexedMap = new Map<string, Date>();
   for (const doc of existingRaw) {
-    if (!doc.file_id) continue;
-    const prev = indexedMap.get(doc.file_id as string);
+    const fid = doc.file_id ? String(doc.file_id) : fileIdFromUrl(String(doc.url ?? ''));
+    if (!fid) continue;
+    const prev = indexedMap.get(fid);
     const cur  = doc.indexed_at instanceof Date ? doc.indexed_at : new Date(doc.indexed_at);
-    if (!prev || cur > prev) indexedMap.set(doc.file_id as string, cur);
+    if (!prev || cur > prev) indexedMap.set(fid, cur);
   }
 
   // ── Filter: only files that are new or modified since last index ──────────
@@ -347,10 +356,16 @@ export async function indexGmailForUser(
   // ── Load already-indexed message IDs ─────────────────────────────────────
   const existingRaw = await col
     .find({ user_id: uid, source: 'gmail' })
-    .project({ message_id: 1 })
+    .project({ message_id: 1, url: 1 })
     .toArray();
   const indexedMsgIds = new Set<string>(
-    existingRaw.map(d => String(d.message_id ?? '')).filter(Boolean)
+    existingRaw.map(d => {
+      // New docs have message_id directly; old docs only have it embedded in the URL
+      // URL format: https://mail.google.com/mail/u/0/#inbox/MESSAGE_ID
+      if (d.message_id) return String(d.message_id);
+      const url = String(d.url ?? '');
+      return url.split('/').pop() ?? '';
+    }).filter(Boolean)
   );
   console.log(`[Embeddings] Gmail: ${indexedMsgIds.size} messages already indexed.`);
 
