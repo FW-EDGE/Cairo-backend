@@ -84,8 +84,14 @@ router.get('/api/vector-map/detail', requireUser, async (req: Request, res: Resp
     const user = req.user!;
     const { name = '', url = '', section = '' } = req.query as { name?: string; url?: string; section?: string };
     const col = await embeddingsCol();
+
+    // When section is empty (e.g. Gmail emails have no section field), match by name+url only.
+    // When section is set (Drive chunks: "chunk_0", "chunk_1"…), include it in the filter.
+    const filter: Record<string, unknown> = { user_id: new ObjectId(user._id), name, url };
+    if (section) filter.section = section;
+
     const doc = await col.findOne(
-      { user_id: new ObjectId(user._id), name, url, section },
+      filter,
       { projection: { name: 1, url: 1, type: 1, source: 1, section: 1, text: 1, indexed_at: 1 } }
     );
     if (!doc) { res.status(404).json({ error: 'Embedding not found' }); return; }
