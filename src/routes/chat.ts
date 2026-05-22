@@ -15,6 +15,8 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no'); // disable Nginx/Cloudflare buffering
+  // Disable Nagle algorithm so small SSE chunks are flushed immediately
+  (req.socket as any)?.setNoDelay?.(true);
   res.flushHeaders();
 
   /** Send a structured SSE event */
@@ -133,9 +135,11 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
     }
 
     send({ type: 'done', tier: user.tier, response: 'CAIRO ha excedido los pasos permitidos para procesar esta solicitud.' });
-  } catch (err) {
-    console.error('[Chat] Error:', err);
-    send({ type: 'error', message: 'Error interno del servidor' });
+  } catch (err: any) {
+    const errMsg = err?.message ?? String(err);
+    console.error('[Chat] Error:', errMsg);
+    // Surface the actual error to the client so it's visible in the chat bubble
+    send({ type: 'error', message: `Error interno: ${errMsg.slice(0, 200)}` });
   } finally {
     clearInterval(keepalive);
     res.end();
