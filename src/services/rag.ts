@@ -112,15 +112,21 @@ async function searchEmbeddingsInMemory(
   maxResults: number
 ): Promise<Array<{ name: string; url: string; type: string; source: string; section: string; text: string; score: number }>> {
   const col = await embeddingsCol();
-  // Limit to 300 most-recently indexed docs to avoid OOM on Render free tier (512 MB RAM).
-  // Each embedding is ~6 KB; 300 docs ≈ 2 MB — safe even without the Atlas vector index.
-  // `text` is fetched separately only for the top results (see caller).
-  const docs = await col
-    .find({ user_id: new ObjectId(userId) })
-    .sort({ indexed_at: -1 })
-    .limit(300)
-    .project({ name: 1, url: 1, type: 1, source: 1, section: 1, text: 1, embedding: 1 })
-    .toArray();
+  const uid = new ObjectId(userId);
+
+  // Fetch up to 200 Drive docs + up to 100 Gmail docs separately so Gmail is never
+  // crowded out by the larger Drive corpus (Render free tier: 512 MB RAM limit).
+  const [driveDocs, gmailDocs] = await Promise.all([
+    col.find({ user_id: uid, source: { $ne: 'gmail' } })
+      .sort({ indexed_at: -1 }).limit(200)
+      .project({ name: 1, url: 1, type: 1, source: 1, section: 1, text: 1, embedding: 1 })
+      .toArray(),
+    col.find({ user_id: uid, source: 'gmail' })
+      .sort({ indexed_at: -1 }).limit(100)
+      .project({ name: 1, url: 1, type: 1, source: 1, section: 1, text: 1, embedding: 1 })
+      .toArray(),
+  ]);
+  const docs = [...driveDocs, ...gmailDocs];
 
   if (docs.length === 0) return [];
 
