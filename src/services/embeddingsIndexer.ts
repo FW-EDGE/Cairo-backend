@@ -5,7 +5,7 @@ import { createRequire } from 'module';
 
 import { embeddingsCol, driveCacheCol } from '../db/client.js';
 import { getConfig } from '../config.js';
-import { GoogleTokens, TIER_LIMITS, Tier } from '../db/users.js';
+import { GoogleTokens, TIER_LIMITS, Tier, recordTokenUsage } from '../db/users.js';
 import { tokensToClient } from '../auth/google.js';
 import { DriveFile, saveDriveCache } from '../db/driveCache.js';
 import { mimeToType } from '../routes/drive.js';
@@ -70,8 +70,9 @@ function truncateForEmbedding(text: string): string {
 async function batchEmbeddings(
   openai: OpenAI,
   texts: string[]
-): Promise<number[][]> {
+): Promise<{ vectors: number[][]; tokensUsed: number }> {
   const allVectors: number[][] = [];
+  let tokensUsed = 0;
   for (let i = 0; i < texts.length; i += EMBED_BATCH_SIZE) {
     const batch = texts.slice(i, i + EMBED_BATCH_SIZE).map(truncateForEmbedding);
     try {
@@ -80,13 +81,13 @@ async function batchEmbeddings(
         input: batch,
       });
       allVectors.push(...res.data.map((d) => d.embedding));
+      tokensUsed += res.usage?.total_tokens ?? 0;
     } catch (err: any) {
       console.error(`[Embeddings] OpenAI Batch Error: ${err.message}`);
-      // Return zero-vectors for this batch so the rest of indexing continues
       allVectors.push(...batch.map(() => new Array(1536).fill(0)));
     }
   }
-  return allVectors;
+  return { vectors: allVectors, tokensUsed };
 }
 
 async function fetchAllDriveFilesFlat(driveApi: drive_v3.Drive): Promise<DriveFile[]> {
@@ -269,7 +270,8 @@ export async function indexDriveForUser(
         const docsToInsert = currentDocs.slice(0, remaining);
         const capped = docsToInsert.length < currentDocs.length;
 
-        const vectors = await batchEmbeddings(openai, docsToInsert.map(d => d.text));
+        const { vectors, tokensUsed: embTok } = await batchEmbeddings(openai, docsToInsert.map(d => d.text));
+        if (embTok > 0) recordTokenUsage(userId, { embedding_tokens: embTok }).catch(() => {});
         const now = new Date();
         const embedDocs = docsToInsert.map((d, idx) => ({
           user_id:    uid,
@@ -431,7 +433,8 @@ export async function indexGmailForUser(
 
     if (emailDocs.length === 0) continue;
 
-    const vectors = await batchEmbeddings(openai, emailDocs.map((d) => d.text));
+    const { vectors, tokensUsed: embTok } = await batchEmbeddings(openai, emailDocs.map((d) => d.text));
+    if (embTok > 0) recordTokenUsage(userId, { embedding_tokens: embTok }).catch(() => {});
     const embedDocs = emailDocs.map((d, idx) => ({
       user_id:    uid,
       message_id: d.message_id,

@@ -3,6 +3,7 @@ import OpenAI from 'openai';
 import { driveCacheCol, embeddingsCol } from '../db/client.js';
 import { getConfig } from '../config.js';
 import { DriveFile } from '../db/driveCache.js';
+import { recordTokenUsage } from '../db/users.js';
 
 export const STOPWORDS_ES = new Set([
   'a', 'al', 'algo', 'algunas', 'algunos', 'ante', 'antes', 'como', 'con', 'contra',
@@ -175,6 +176,8 @@ export async function searchEmbeddings(
     input: query,
   });
   const queryVector = embeddingRes.data[0].embedding;
+  const queryTokens = embeddingRes.usage?.total_tokens ?? 0;
+  if (queryTokens > 0) recordTokenUsage(userId, { embedding_tokens: queryTokens }).catch(() => {});
 
   const col = await embeddingsCol();
   let results: Array<{ name: string; url: string; type: string; source: string; section: string; text: string; score: number }> = [];

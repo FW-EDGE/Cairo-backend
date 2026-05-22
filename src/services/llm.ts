@@ -111,12 +111,14 @@ function buildFormattedMessages(
   ];
 }
 
+export interface LlmUsage { input: number; output: number; }
+
 /** Non-streaming call — used for tool-call iterations where we need tool_calls back. */
 export async function getLlmResponse(
   messages: any[],
   contextBlock: string,
   tools?: any[]
-): Promise<{ content: string; tool_calls?: any[] }> {
+): Promise<{ content: string; tool_calls?: any[]; usage: LlmUsage }> {
   const client = getOpenAI();
   const completion = await client.chat.completions.create({
     model: getModel(),
@@ -126,13 +128,18 @@ export async function getLlmResponse(
     tools: tools && tools.length > 0 ? tools : undefined,
   });
   const message = completion.choices[0]?.message;
-  return { content: message?.content ?? '', tool_calls: message?.tool_calls };
+  const usage: LlmUsage = {
+    input:  completion.usage?.prompt_tokens     ?? 0,
+    output: completion.usage?.completion_tokens ?? 0,
+  };
+  return { content: message?.content ?? '', tool_calls: message?.tool_calls, usage };
 }
 
-/** Streaming call — used for the final response; yields tokens as they arrive. */
+/** Streaming call — yields tokens; calls onUsage once the stream is done. */
 export async function* getLlmStream(
   messages: any[],
   contextBlock: string,
+  onUsage?: (u: LlmUsage) => void,
 ): AsyncGenerator<string> {
   const client = getOpenAI();
   const stream = await client.chat.completions.create({
@@ -141,8 +148,13 @@ export async function* getLlmStream(
     max_tokens: 2048,
     temperature: 0.5,
     stream: true,
+    stream_options: { include_usage: true },
   });
   for await (const chunk of stream) {
+    // Last chunk carries the usage summary when stream_options.include_usage is true
+    if (chunk.usage && onUsage) {
+      onUsage({ input: chunk.usage.prompt_tokens ?? 0, output: chunk.usage.completion_tokens ?? 0 });
+    }
     const token = chunk.choices[0]?.delta?.content;
     if (token) yield token;
   }

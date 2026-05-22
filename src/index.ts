@@ -26,6 +26,7 @@ import chatRouter from "./routes/chat.js";
 import embeddingsRouter from "./routes/embeddings.js";
 import vectorMapRouter from "./routes/vectorMap.js";
 import skillsRouter from "./routes/skills.js";
+import adminRouter from "./routes/admin.js";
 
 // Validate config at startup — log clearly but don't crash so the WS/health endpoints stay up
 let _startupConfigOk = false;

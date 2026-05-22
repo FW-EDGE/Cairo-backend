@@ -3,13 +3,14 @@ import { usersCol } from './client.js';
 
 // ─── Tier limits ────────────────────────────────────────────────────────────
 export const TIER_LIMITS = {
-  free:     { maxDriveEmbeddings: 0,       maxEmails: 50,    chat_messages: 20   },
-  pro:      { maxDriveEmbeddings: 20_000,  maxEmails: 500,   chat_messages: 300  },
-  business: { maxDriveEmbeddings: 150_000, maxEmails: 5_000, chat_messages: 2000 },
+  free:     { maxDriveEmbeddings: 0,         maxEmails: 50,     chat_messages: 20      },
+  pro:      { maxDriveEmbeddings: 20_000,    maxEmails: 500,    chat_messages: 300     },
+  business: { maxDriveEmbeddings: 150_000,   maxEmails: 5_000,  chat_messages: 2_000   },
+  admin:    { maxDriveEmbeddings: 999_999,   maxEmails: 99_999, chat_messages: 999_999 },
 } as const;
 
 export type Tier = keyof typeof TIER_LIMITS;
-export type PaidTier = 'pro' | 'business';
+export type PaidTier = 'pro' | 'business' | 'admin';
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface GoogleTokens {
@@ -24,6 +25,12 @@ export interface ChatUsage {
   period_start: string; // ISO — start of current 30-day period
 }
 
+export interface TokenUsage {
+  embedding_tokens:   number; // text-embedding-3-small ($0.02/1M)
+  chat_input_tokens:  number; // prompt tokens
+  chat_output_tokens: number; // completion tokens
+}
+
 export interface AppUser {
   _id: string;
   google_id: string | null;
@@ -32,8 +39,9 @@ export interface AppUser {
   picture: string;
   password_hash?: string;
   google_tokens?: GoogleTokens;
-  tier: 'free' | 'pro' | 'business';
+  tier: 'free' | 'pro' | 'business' | 'admin';
   usage?: ChatUsage;
+  token_usage?: TokenUsage;
   created_at: string;
   last_login: string;
   onboarding_completed: boolean;
@@ -321,6 +329,22 @@ export async function incrementChatUsage(userId: string): Promise<number> {
     );
   }
   return result?.usage?.chat_messages ?? 1;
+}
+
+/**
+ * Atomically add token counts to a user's cumulative token_usage.
+ */
+export async function recordTokenUsage(
+  userId: string,
+  delta: Partial<TokenUsage>
+): Promise<void> {
+  const col = await usersCol();
+  const inc: any = {};
+  if (delta.embedding_tokens)   inc['token_usage.embedding_tokens']   = delta.embedding_tokens;
+  if (delta.chat_input_tokens)  inc['token_usage.chat_input_tokens']  = delta.chat_input_tokens;
+  if (delta.chat_output_tokens) inc['token_usage.chat_output_tokens'] = delta.chat_output_tokens;
+  if (Object.keys(inc).length === 0) return;
+  await col.updateOne({ _id: new ObjectId(userId) }, { $inc: inc });
 }
 
 /**

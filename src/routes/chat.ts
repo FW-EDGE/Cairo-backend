@@ -3,7 +3,7 @@ import { requireUser } from '../auth/middleware.js';
 import { buildContextBlock } from '../services/rag.js';
 import { getLlmResponse, getLlmStream, REPORT_TOOL, SEARCH_DRIVE_TOOL, READ_FILE_TOOL } from '../services/llm.js';
 import { broadcastJson } from '../websocket.js';
-import { getGoogleTokens, incrementChatUsage, TIER_LIMITS, Tier } from '../db/users.js';
+import { getGoogleTokens, incrementChatUsage, recordTokenUsage, TIER_LIMITS, Tier } from '../db/users.js';
 import { createDriveFolder, copyDriveFile, updateFileContent, searchDriveFiles, getFileContent } from '../services/driveActions.js';
 
 const router = Router();
@@ -77,7 +77,9 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
     while (iteration < 5) {
       // ── No tools: stream tokens directly from OpenAI (true SSE) ─────────────
       if (tools.length === 0) {
-        for await (const token of getLlmStream(messages, customContext)) {
+        for await (const token of getLlmStream(messages, customContext, (u) => {
+          recordTokenUsage(user._id, { chat_input_tokens: u.input, chat_output_tokens: u.output }).catch(() => {});
+        })) {
           send({ type: 'delta', content: token });
         }
         if (ragItems.length > 0) {
@@ -92,7 +94,8 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
       }
 
       // ── Tools enabled: non-streaming call to capture tool_calls ─────────────
-      const { content, tool_calls } = await getLlmResponse(messages, customContext, tools);
+      const { content, tool_calls, usage: llmUsage } = await getLlmResponse(messages, customContext, tools);
+      recordTokenUsage(user._id, { chat_input_tokens: llmUsage.input, chat_output_tokens: llmUsage.output }).catch(() => {});
 
       if (!tool_calls || tool_calls.length === 0) {
         // Final answer after tool iterations — content already fetched, send as-is

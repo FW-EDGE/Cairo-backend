@@ -34,6 +34,16 @@ export async function requireUser(req: Request, res: Response, next: NextFunctio
   next();
 }
 
+export async function requireAdmin(req: Request, res: Response, next: NextFunction): Promise<void> {
+  await requireUser(req, res, async () => {
+    if (req.user?.tier !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    next();
+  });
+}
+
 export async function optionalUser(req: Request, _res: Response, next: NextFunction): Promise<void> {
   req.user = null;
   const token = req.cookies?.[COOKIE_NAME];
