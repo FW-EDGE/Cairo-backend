@@ -119,8 +119,11 @@ export async function indexDriveForUser(
 
   let processedCount = 0;
   let totalChunksInserted = 0;
-  const CONCURRENCY   = 5;
-  const SAVE_BATCH_SIZE = 20;
+  const CONCURRENCY     = 2;  // low: large files eat RAM fast
+  const SAVE_BATCH_SIZE = 10; // save more often to flush currentDocs
+  // Cap text per file so a single huge doc can't blow the heap.
+  // 40 000 chars ≈ 100 chunks of 400 words — plenty of semantic coverage.
+  const MAX_FILE_CHARS  = 40_000;
 
   // Use a run-specific timestamp so we can delete OLD docs at the end
   // without touching the new ones we just inserted.
@@ -156,7 +159,9 @@ export async function indexDriveForUser(
         }
 
         if (text && text.trim().length > 20) {
-          const chunks = chunkText(text, 400);
+          // Truncate before chunking so a single large file can't blow the heap
+          const truncated = text.length > MAX_FILE_CHARS ? text.slice(0, MAX_FILE_CHARS) : text;
+          const chunks = chunkText(truncated, 400);
           chunks.forEach((chunk, idx) => {
             currentDocs.push({
               name: file.name,
