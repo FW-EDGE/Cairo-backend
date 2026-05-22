@@ -3,9 +3,9 @@ import { usersCol } from './client.js';
 
 // ─── Tier limits ────────────────────────────────────────────────────────────
 export const TIER_LIMITS = {
-  free:     { maxDriveEmbeddings: 0,       maxEmails: 50     },
-  pro:      { maxDriveEmbeddings: 20_000,  maxEmails: 500    },
-  business: { maxDriveEmbeddings: 150_000, maxEmails: 5_000  },
+  free:     { maxDriveEmbeddings: 0,       maxEmails: 50,    chat_messages: 20   },
+  pro:      { maxDriveEmbeddings: 20_000,  maxEmails: 500,   chat_messages: 300  },
+  business: { maxDriveEmbeddings: 150_000, maxEmails: 5_000, chat_messages: 2000 },
 } as const;
 
 export type Tier = keyof typeof TIER_LIMITS;
@@ -19,6 +19,11 @@ export interface GoogleTokens {
   scopes: string[];
 }
 
+export interface ChatUsage {
+  chat_messages: number;
+  period_start: string; // ISO — start of current 30-day period
+}
+
 export interface AppUser {
   _id: string;
   google_id: string | null;
@@ -28,6 +33,7 @@ export interface AppUser {
   password_hash?: string;
   google_tokens?: GoogleTokens;
   tier: 'free' | 'pro' | 'business';
+  usage?: ChatUsage;
   created_at: string;
   last_login: string;
   onboarding_completed: boolean;
@@ -289,5 +295,41 @@ export async function toggleSkill(userId: string, skillId: string, enabled: bool
   await col.updateOne(
     { _id: new ObjectId(userId) },
     { $set: { [`skills.${skillId}`]: enabled } }
+  );
+}
+
+/**
+ * Atomically increment chat_messages counter for the user.
+ * If usage doesn't exist yet, initialise it first.
+ * Returns the new count after increment.
+ */
+export async function incrementChatUsage(userId: string): Promise<number> {
+  const col = await usersCol();
+  const result = await col.findOneAndUpdate(
+    { _id: new ObjectId(userId) },
+    {
+      $inc: { 'usage.chat_messages': 1 },
+      $setOnInsert: { 'usage.period_start': new Date().toISOString() },
+    },
+    { returnDocument: 'after', upsert: false }
+  );
+  // Ensure period_start exists (first-time users won't have it)
+  if (result && !result.usage?.period_start) {
+    await col.updateOne(
+      { _id: new ObjectId(userId) },
+      { $set: { 'usage.period_start': new Date().toISOString() } }
+    );
+  }
+  return result?.usage?.chat_messages ?? 1;
+}
+
+/**
+ * Reset monthly quota counters for all users (called by the monthly cron job).
+ */
+export async function resetAllChatUsage(): Promise<void> {
+  const col = await usersCol();
+  await col.updateMany(
+    {},
+    { $set: { 'usage.chat_messages': 0, 'usage.period_start': new Date().toISOString() } }
   );
 }

@@ -3,7 +3,7 @@ import { requireUser } from '../auth/middleware.js';
 import { buildContextBlock } from '../services/rag.js';
 import { getLlmResponse, getLlmStream, REPORT_TOOL, SEARCH_DRIVE_TOOL, READ_FILE_TOOL } from '../services/llm.js';
 import { broadcastJson } from '../websocket.js';
-import { getGoogleTokens } from '../db/users.js';
+import { getGoogleTokens, incrementChatUsage, TIER_LIMITS, Tier } from '../db/users.js';
 import { createDriveFolder, copyDriveFile, updateFileContent, searchDriveFiles, getFileContent } from '../services/driveActions.js';
 
 const router = Router();
@@ -29,6 +29,23 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
     const user = req.user!;
     const { message, history = [] } = req.body as { message: string; history?: any[] };
     if (!message) { send({ type: 'error', message: 'message is required' }); return; }
+
+    // ── Monthly quota check ───────────────────────────────────────────────────
+    const tier = (user.tier ?? 'free') as Tier;
+    const limit = TIER_LIMITS[tier].chat_messages;
+    const usage = user.usage ?? { chat_messages: 0, period_start: new Date().toISOString() };
+    const periodStart = new Date(usage.period_start);
+    const daysSince = (Date.now() - periodStart.getTime()) / 86_400_000;
+    const effectiveCount = daysSince >= 30 ? 0 : usage.chat_messages;
+
+    if (effectiveCount >= limit) {
+      const nextTier = tier === 'free' ? 'Pro' : tier === 'pro' ? 'Business' : null;
+      send({ type: 'quota_exceeded', tier, limit, used: effectiveCount, nextTier });
+      return;
+    }
+
+    // Increment atomically before processing (prevents race conditions)
+    await incrementChatUsage(user._id);
 
     // ── RAG context (wrapped so an OOM in embedding search doesn't kill the server) ───
     const { context: contextBlock, items: ragItems } = await buildContextBlock(user._id, message, user.tier, history)

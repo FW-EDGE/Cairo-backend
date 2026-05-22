@@ -13,10 +13,15 @@ export interface VectorPoint {
   z: number;
 }
 
-// Memory budget (512 MB Render free tier, 400 MB heap cap):
-//   3 000 × 12 KB = 36 MB raw + 18 MB PCA sample + ~100 MB Node overhead ≈ 154 MB.
-//   3 000 points is plenty for a 3-D scatter — beyond ~2 000 nodes overlap anyway.
-const MAX_DOCS   = 3_000;
+// Memory budget (Render, 460 MB heap cap):
+//   15 000 × 1536 floats × 4 B = ~92 MB vectors
+//   + MongoDB doc overhead during fetch ≈ 180 MB peak
+//   + PCA sample (1 000 rows) ≈ 6 MB
+//   + Node overhead ≈ 100 MB
+//   Total ≈ 286 MB — fits within the 460 MB limit.
+//   PCA_SAMPLE stays at 1 000: more than enough to capture principal components
+//   even for 15k points (law of large numbers kicks in well before that).
+const MAX_DOCS   = 15_000;
 const PCA_SAMPLE = 1_000;
 const PCA_ITERS  = 20;
 

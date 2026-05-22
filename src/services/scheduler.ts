@@ -1,7 +1,7 @@
 import cron from 'node-cron';
 import { usersCol } from '../db/client.js';
 import { runFullIndex } from './embeddingsIndexer.js';
-import { getGoogleTokens, PaidTier } from '../db/users.js';
+import { getGoogleTokens, PaidTier, resetAllChatUsage } from '../db/users.js';
 
 /**
  * Ping our own /health every 14 min so Render free tier never sleeps.
@@ -61,4 +61,17 @@ export function startScheduler() {
   });
 
   console.log('[Scheduler] Cron job scheduled (every 12 hours)');
+
+  // Reset all users' monthly chat quotas on the 1st of each month at 00:00 UTC
+  cron.schedule('0 0 1 * *', async () => {
+    console.log('[Scheduler] Monthly quota reset starting…');
+    try {
+      await resetAllChatUsage();
+      console.log('[Scheduler] Monthly quota reset complete.');
+    } catch (err) {
+      console.error('[Scheduler] Monthly quota reset error:', err);
+    }
+  });
+
+  console.log('[Scheduler] Monthly quota reset scheduled (1st of each month)');
 }

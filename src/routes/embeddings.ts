@@ -48,7 +48,7 @@ router.get('/embeddings/status', requireUser, async (req: Request, res: Response
     const tier = (user.tier ?? 'free') as Tier;
     const limits = TIER_LIMITS[tier];
     const maxTotal = limits.maxDriveEmbeddings + limits.maxEmails;
-    res.json({ counts, total, tier, limits, maxTotal });
+    res.json({ counts, total, tier, limits, maxTotal, usage: user.usage ?? null });
   } catch (err) {
     console.error('[Embeddings] GET /embeddings/status error:', err);
     res.status(500).json({ error: 'Failed to fetch embeddings status' });
