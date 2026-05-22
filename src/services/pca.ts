@@ -13,13 +13,11 @@ export interface VectorPoint {
   z: number;
 }
 
-// Memory budget (512 MB Render free tier, 460 MB heap):
-//   N docs × 1536 floats × 8 bytes = N × 12 KB raw.
-//   PCA sample copy: 1500 × 12 KB = 18 MB (one copy only, in-place after that).
-//   Node/Express/MongoDB overhead: ~100 MB.
-//   15 000 × 12 KB + 18 MB + 100 MB ≈ 298 MB  ← safe headroom.
-const MAX_DOCS   = 15_000;
-const PCA_SAMPLE = 1_500;
+// Memory budget (512 MB Render free tier, 400 MB heap cap):
+//   3 000 × 12 KB = 36 MB raw + 18 MB PCA sample + ~100 MB Node overhead ≈ 154 MB.
+//   3 000 points is plenty for a 3-D scatter — beyond ~2 000 nodes overlap anyway.
+const MAX_DOCS   = 3_000;
+const PCA_SAMPLE = 1_000;
 const PCA_ITERS  = 20;
 
 // ── Linear algebra helpers ────────────────────────────────────────────────────
