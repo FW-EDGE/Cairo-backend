@@ -30,8 +30,12 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
     const { message, history = [] } = req.body as { message: string; history?: any[] };
     if (!message) { send({ type: 'error', message: 'message is required' }); return; }
 
-    // ── RAG context ───────────────────────────────────────────────────────────
-    const { context: contextBlock, items: ragItems } = await buildContextBlock(user._id, message, user.tier, history);
+    // ── RAG context (wrapped so an OOM in embedding search doesn't kill the server) ───
+    const { context: contextBlock, items: ragItems } = await buildContextBlock(user._id, message, user.tier, history)
+      .catch((err) => {
+        console.error('[Chat] RAG error (continuing without context):', err?.message ?? err);
+        return { context: '', items: [] as any[] };
+      });
 
     const isReportEnabled = user.skills?.['report_generation'] === true;
     const tools = isReportEnabled ? [REPORT_TOOL, SEARCH_DRIVE_TOOL, READ_FILE_TOOL] : [];

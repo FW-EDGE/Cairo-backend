@@ -112,9 +112,13 @@ async function searchEmbeddingsInMemory(
   maxResults: number
 ): Promise<Array<{ name: string; url: string; type: string; source: string; section: string; text: string; score: number }>> {
   const col = await embeddingsCol();
-  // Fetch all embeddings for this user (no special index needed)
+  // Limit to 300 most-recently indexed docs to avoid OOM on Render free tier (512 MB RAM).
+  // Each embedding is ~6 KB; 300 docs ≈ 2 MB — safe even without the Atlas vector index.
+  // `text` is fetched separately only for the top results (see caller).
   const docs = await col
     .find({ user_id: new ObjectId(userId) })
+    .sort({ indexed_at: -1 })
+    .limit(300)
     .project({ name: 1, url: 1, type: 1, source: 1, section: 1, text: 1, embedding: 1 })
     .toArray();
 
@@ -198,9 +202,12 @@ export async function searchEmbeddings(
     console.log(`[RAG] Atlas vector search: ${results.length} results`);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[RAG] Atlas vector search failed (${msg}), using in-memory cosine fallback`);
+    // Only warn once per process start to avoid log spam
+    if (!(searchEmbeddings as any)._warnedFallback) {
+      console.warn(`[RAG] Atlas vector index not found — using in-memory fallback (limited to 300 docs). Create a vector index named "${config.mongodb.vector_index}" in Atlas to fix this.`);
+      (searchEmbeddings as any)._warnedFallback = true;
+    }
     results = await searchEmbeddingsInMemory(userId, queryVector, maxResults);
-    console.log(`[RAG] In-memory cosine fallback: ${results.length} results`);
   }
 
   if (results.length === 0) return { context: '', items: [] };
