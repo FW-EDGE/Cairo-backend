@@ -228,6 +228,32 @@ export async function indexDriveForUser(
   return totalChunksInserted;
 }
 
+/** Extract plain text from a Gmail message part tree (recursive). */
+function extractGmailBody(payload: any, maxChars = 2000): string {
+  if (!payload) return '';
+  // If this part has a body with data, decode it
+  if (payload.body?.data) {
+    try {
+      const decoded = Buffer.from(payload.body.data, 'base64').toString('utf-8');
+      // Strip HTML tags for plain text
+      const plain = decoded.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      if (plain.length > 20) return plain.slice(0, maxChars);
+    } catch { /* ignore */ }
+  }
+  // Recurse into parts
+  if (Array.isArray(payload.parts)) {
+    // Prefer text/plain over text/html
+    const plainPart = payload.parts.find((p: any) => p.mimeType === 'text/plain');
+    const htmlPart  = payload.parts.find((p: any) => p.mimeType === 'text/html');
+    for (const part of [plainPart, htmlPart, ...payload.parts]) {
+      if (!part) continue;
+      const text = extractGmailBody(part, maxChars);
+      if (text.length > 20) return text;
+    }
+  }
+  return '';
+}
+
 export async function indexGmailForUser(
   userId: string,
   googleTokens: GoogleTokens,
@@ -239,45 +265,93 @@ export async function indexGmailForUser(
   const gmail = google.gmail({ version: 'v1', auth: authClient });
   const col = await embeddingsCol();
 
-  const listRes = await gmail.users.messages.list({ userId: 'me', maxResults: maxEmails, q: 'in:inbox' });
-  const messages = listRes.data.messages ?? [];
+  // ── Paginate through ALL emails (Gmail API caps maxResults at 500 per page) ──
+  const messages: Array<{ id: string }> = [];
+  let pageToken: string | undefined;
+  const PAGE_SIZE = 500; // Gmail API maximum per page
 
+  console.log(`[Embeddings] Gmail: fetching up to ${maxEmails} message IDs…`);
+  do {
+    const res = await gmail.users.messages.list({
+      userId: 'me',
+      maxResults: Math.min(PAGE_SIZE, maxEmails - messages.length),
+      // All mail except spam and trash — covers inbox, sent, starred, etc.
+      q: '-in:spam -in:trash',
+      pageToken,
+    });
+    const batch = (res.data.messages ?? []) as Array<{ id: string }>;
+    messages.push(...batch);
+    pageToken = res.data.nextPageToken ?? undefined;
+    console.log(`[Embeddings] Gmail: fetched ${messages.length} IDs so far…`);
+  } while (pageToken && messages.length < maxEmails);
+
+  console.log(`[Embeddings] Gmail: ${messages.length} messages to index`);
+  if (messages.length === 0) return 0;
+
+  // ── Fetch each message with full payload for body extraction ──────────────
   const emailDocs: any[] = [];
-  const CONCURRENCY = 15;
+  const CONCURRENCY = 8; // conservative to avoid Gmail API rate limits
 
   for (let i = 0; i < messages.length; i += CONCURRENCY) {
     const batch = messages.slice(i, i + CONCURRENCY);
     await Promise.all(batch.map(async (m) => {
       try {
-        const msg = await gmail.users.messages.get({ userId: 'me', id: m.id!, format: 'metadata', metadataHeaders: ['Subject', 'From', 'Date'] });
+        const msg = await gmail.users.messages.get({
+          userId: 'me',
+          id: m.id!,
+          format: 'full', // full payload so we can extract body text
+        });
         const headers = msg.data.payload?.headers ?? [];
-        const subject = headers.find(h => h.name === 'Subject')?.value ?? '(Sin asunto)';
-        const from = headers.find(h => h.name === 'From')?.value ?? '';
-        const date = headers.find(h => h.name === 'Date')?.value ?? '';
-        const text = `De: ${from}\nFecha: ${date}\nAsunto: ${subject}\n${msg.data.snippet}`;
-        emailDocs.push({ name: subject, url: `https://mail.google.com/mail/u/0/#inbox/${m.id}`, type: 'email', text });
-      } catch (err) {}
+        const subject = headers.find((h: any) => h.name === 'Subject')?.value ?? '(Sin asunto)';
+        const from    = headers.find((h: any) => h.name === 'From')?.value ?? '';
+        const date    = headers.find((h: any) => h.name === 'Date')?.value ?? '';
+
+        // Try to get body text; fall back to snippet
+        const body = extractGmailBody(msg.data.payload) || (msg.data.snippet ?? '');
+
+        const text = `De: ${from}\nFecha: ${date}\nAsunto: ${subject}\n\n${body}`;
+        emailDocs.push({
+          name: subject,
+          url:  `https://mail.google.com/mail/u/0/#inbox/${m.id}`,
+          type: 'email',
+          text,
+        });
+      } catch { /* skip individual failures */ }
     }));
+
+    if (i % 200 === 0 && i > 0) {
+      console.log(`[Embeddings] Gmail: fetched content for ${i}/${messages.length} messages…`);
+    }
   }
 
   if (emailDocs.length === 0) return 0;
-  const vectors = await batchEmbeddings(openai, emailDocs.map(d => d.text));
-  const embedDocs = emailDocs.map((d, i) => ({
-    user_id: new ObjectId(userId),
-    name: d.name,
-    url: d.url,
-    type: d.type,
-    source: 'gmail',
-    text: d.text,
-    preview: d.text.length > 160 ? d.text.slice(0, 160).trimEnd() + '…' : d.text,
-    embedding: vectors[i],
-    indexed_at: new Date(),
-  }));
 
+  // ── Vectorize in batches and save ─────────────────────────────────────────
+  const EMBED_BATCH = 200;
   await col.deleteMany({ user_id: new ObjectId(userId), source: 'gmail' });
-  await col.insertMany(embedDocs);
-  console.log(`[Embeddings] Gmail indexing finished: ${embedDocs.length} chunks.`);
-  return embedDocs.length;
+  let totalInserted = 0;
+
+  for (let i = 0; i < emailDocs.length; i += EMBED_BATCH) {
+    const batch = emailDocs.slice(i, i + EMBED_BATCH);
+    const vectors = await batchEmbeddings(openai, batch.map((d: any) => d.text));
+    const embedDocs = batch.map((d: any, idx: number) => ({
+      user_id:    new ObjectId(userId),
+      name:       d.name,
+      url:        d.url,
+      type:       d.type,
+      source:     'gmail',
+      text:       d.text,
+      preview:    d.text.length > 160 ? d.text.slice(0, 160).trimEnd() + '…' : d.text,
+      embedding:  vectors[idx],
+      indexed_at: new Date(),
+    }));
+    await col.insertMany(embedDocs);
+    totalInserted += embedDocs.length;
+    console.log(`[Embeddings] Gmail: vectorized and saved ${totalInserted}/${emailDocs.length}`);
+  }
+
+  console.log(`[Embeddings] Gmail indexing complete: ${totalInserted} emails indexed.`);
+  return totalInserted;
 }
 
 export async function runFullIndex(
