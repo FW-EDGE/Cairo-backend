@@ -34,6 +34,29 @@ function chunkText(text: string, chunkSize = 400): string[] {
   return chunks.filter((c) => c.trim().length > 20); // Only chunks with meaningful length
 }
 
+/**
+ * Read a Node.js Readable stream collecting at most `maxBytes` bytes, then
+ * destroy the stream so the HTTP connection closes early.
+ * Never loads more than maxBytes into RAM regardless of remote file size.
+ */
+async function streamToText(stream: NodeJS.ReadableStream, maxBytes: number): Promise<string> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const raw of stream as AsyncIterable<Buffer | string>) {
+    const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as string);
+    const space = maxBytes - total;
+    if (buf.length >= space) {
+      chunks.push(buf.subarray(0, space));
+      (stream as any).destroy?.();
+      total += space;
+      break;
+    }
+    chunks.push(buf);
+    total += buf.length;
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 // text-embedding-3-small: max 8,191 tokens per input, 300,000 tokens per batch request.
 // At ~4 chars/token, 6,000 chars ≈ 1,500 tokens — safe per-input ceiling.
 // With BATCH_SIZE=50: 50 × 1,500 = 75,000 tokens max per request — well under the 300k limit.
@@ -119,11 +142,12 @@ export async function indexDriveForUser(
 
   let processedCount = 0;
   let totalChunksInserted = 0;
-  const CONCURRENCY     = 2;  // low: large files eat RAM fast
-  const SAVE_BATCH_SIZE = 10; // save more often to flush currentDocs
-  // Cap text per file so a single huge doc can't blow the heap.
-  // 40 000 chars ≈ 100 chunks of 400 words — plenty of semantic coverage.
-  const MAX_FILE_CHARS  = 40_000;
+  const CONCURRENCY     = 1;  // one file at a time — PDFs + large docs are RAM hogs
+  const SAVE_BATCH_SIZE = 5;  // flush currentDocs every 5 files
+  // Cap text per file: 20 000 chars ≈ 50 chunks of 400 words.
+  const MAX_FILE_CHARS  = 20_000;
+  // Skip files larger than 10 MB — huge PDFs/spreadsheets will OOM the parser.
+  const MAX_FILE_BYTES  = 10_000_000;
 
   // Use a run-specific timestamp so we can delete OLD docs at the end
   // without touching the new ones we just inserted.
@@ -137,31 +161,58 @@ export async function indexDriveForUser(
 
     await Promise.all(batch.map(async (file) => {
       try {
+        // Skip files that are too large to parse safely in a 400 MB heap
+        const fileBytes = file.size ? parseInt(file.size, 10) : 0;
+        if (fileBytes > MAX_FILE_BYTES) {
+          console.log(`[Embeddings] Skipping "${file.name}" (${Math.round(fileBytes / 1_000_000)}MB > limit)`);
+          return;
+        }
+
         let text = '';
         const exportMime = EXPORTABLE_MIMES[file.mimeType];
+        // MAX_STREAM_BYTES: we stop downloading after this many bytes.
+        // At ~4 bytes/char, 80 000 bytes ≈ 20 000 chars ≈ 50 chunks of 400 words.
+        const MAX_STREAM_BYTES = MAX_FILE_CHARS * 4;
 
         if (file.mimeType.startsWith('application/vnd.google-apps.')) {
-          const res = await drive.files.export({ fileId: file.id, mimeType: exportMime }, { responseType: 'text' });
-          text = res.data as string;
+          // Google-native doc: stream the export and cut off after MAX_STREAM_BYTES
+          const res = await drive.files.export(
+            { fileId: file.id, mimeType: exportMime },
+            { responseType: 'stream' }
+          );
+          text = await streamToText(res.data as unknown as NodeJS.ReadableStream, MAX_STREAM_BYTES);
         } else if (file.mimeType === 'application/pdf') {
-          const res = await drive.files.get({ fileId: file.id, alt: 'media' }, { responseType: 'arraybuffer' });
-          try {
-            const _require = createRequire(import.meta.url);
-            const pdfParse = _require('pdf-parse');
-            const data = await pdfParse(Buffer.from(res.data as ArrayBuffer));
-            text = data.text || '';
-          } catch (err) {
-            console.warn(`[Embeddings] PDF parse failed for "${file.name}":`, err);
+          // PDFs need a full buffer for pdf-parse; hard-cap at 3 MB so the parser
+          // never uses more than ~30 MB of heap (pdf-parse ≈ 10× raw size).
+          const MAX_PDF_BYTES = 3_000_000;
+          const pdfBytes = file.size ? parseInt(file.size, 10) : 0;
+          if (pdfBytes > MAX_PDF_BYTES) {
+            console.log(`[Embeddings] Skipping PDF "${file.name}" (${Math.round(pdfBytes / 1_000_000)}MB > 3MB PDF limit)`);
+          } else {
+            try {
+              const res = await drive.files.get(
+                { fileId: file.id, alt: 'media' },
+                { responseType: 'arraybuffer' }
+              );
+              const _require = createRequire(import.meta.url);
+              const pdfParse = _require('pdf-parse');
+              const data = await pdfParse(Buffer.from(res.data as ArrayBuffer));
+              text = (data.text || '').slice(0, MAX_FILE_CHARS);
+            } catch (err) {
+              console.warn(`[Embeddings] PDF parse failed for "${file.name}":`, err);
+            }
           }
         } else {
-          const res = await drive.files.get({ fileId: file.id, alt: 'media' }, { responseType: 'text' });
-          text = res.data as string;
+          // Binary / plain-text: stream and cut off after MAX_STREAM_BYTES
+          const res = await drive.files.get(
+            { fileId: file.id, alt: 'media' },
+            { responseType: 'stream' }
+          );
+          text = await streamToText(res.data as unknown as NodeJS.ReadableStream, MAX_STREAM_BYTES);
         }
 
         if (text && text.trim().length > 20) {
-          // Truncate before chunking so a single large file can't blow the heap
-          const truncated = text.length > MAX_FILE_CHARS ? text.slice(0, MAX_FILE_CHARS) : text;
-          const chunks = chunkText(truncated, 400);
+          const chunks = chunkText(text, 400);
           chunks.forEach((chunk, idx) => {
             currentDocs.push({
               name: file.name,
@@ -397,13 +448,18 @@ export async function runFullIndex(
   const limits = TIER_LIMITS[tier];
   console.log(`[Embeddings] Starting full index for user ${userId} (tier: ${tier}, drive cap: ${limits.maxDriveEmbeddings}, email cap: ${limits.maxEmails})`);
 
-  const drive = await indexDriveForUser(userId, googleTokens, limits.maxDriveEmbeddings).catch((e) => {
-    console.error('[Embeddings] Drive sync FATAL error:', e);
-    return 0;
-  });
-  const gmail = await indexGmailForUser(userId, googleTokens, limits.maxEmails).catch((e) => {
-    console.error('[Embeddings] Gmail sync FATAL error:', e);
-    return 0;
-  });
+  // Run Drive and Gmail in parallel — each fails independently so an OOM in one
+  // doesn't prevent the other from completing.
+  const [drive, gmail] = await Promise.all([
+    indexDriveForUser(userId, googleTokens, limits.maxDriveEmbeddings).catch((e) => {
+      console.error('[Embeddings] Drive sync FATAL error:', e);
+      return 0;
+    }),
+    indexGmailForUser(userId, googleTokens, limits.maxEmails).catch((e) => {
+      console.error('[Embeddings] Gmail sync FATAL error:', e);
+      return 0;
+    }),
+  ]);
+
   return { drive, gmail, total: drive + gmail, limits };
 }

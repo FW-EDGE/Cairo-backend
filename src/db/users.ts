@@ -3,8 +3,8 @@ import { usersCol } from './client.js';
 
 // ─── Tier limits ────────────────────────────────────────────────────────────
 export const TIER_LIMITS = {
-  pro:      { maxDriveEmbeddings: 20_000,  maxEmails: 1_000  },
-  business: { maxDriveEmbeddings: 150_000, maxEmails: 10_000 },
+  pro:      { maxDriveEmbeddings: 20_000,  maxEmails: 5_000  },
+  business: { maxDriveEmbeddings: 150_000, maxEmails: 20_000 },
 } as const;
 
 export type Tier = 'free' | 'pro' | 'business';
