@@ -27,7 +27,15 @@ import embeddingsRouter from "./routes/embeddings.js";
 import vectorMapRouter from "./routes/vectorMap.js";
 import skillsRouter from "./routes/skills.js";
 
-const config = getConfig();
+// Validate config at startup — log clearly but don't crash so the WS/health endpoints stay up
+let _startupConfigOk = false;
+try {
+  getConfig();
+  _startupConfigOk = true;
+} catch (err: any) {
+  console.error("[CAIRO] ⚠️  CONFIG ERROR — missing env var:", err.message);
+  console.error("[CAIRO] The server will start but routes requiring this config will fail.");
+}
 console.log("[CAIRO] FRONTEND_URL env:", process.env.FRONTEND_URL);
 
 const app = express();
@@ -59,15 +67,43 @@ app.use(embeddingsRouter);
 app.use(vectorMapRouter);
 app.use(skillsRouter);
 
-// Health check
+// Health check — also reports missing env vars so Render logs show the problem clearly
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", version: "express-v1" });
+  const required = [
+    "MONGODB_URI", "MONGODB_DATABASE", "JWT_SECRET",
+    "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI",
+    "OPENAI_API_KEY",
+  ];
+  const missing = required.filter((k) => !process.env[k]);
+  if (missing.length > 0) {
+    console.error("[CAIRO] /health — missing env vars:", missing.join(", "));
+    res.status(500).json({ status: "misconfigured", missing });
+    return;
+  }
+  res.json({ status: "ok", version: "express-v1", config: _startupConfigOk });
 });
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 const wss = new WebSocketServer({ server, path: "/ws" });
+
+// Ping all clients every 30 s — prevents Render's 90-second idle-connection kill
+const wsPingInterval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if ((ws as any)._cairoAlive === false) {
+      ws.terminate();
+      return;
+    }
+    (ws as any)._cairoAlive = false;
+    ws.ping();
+  });
+}, 30_000);
+wss.on("close", () => clearInterval(wsPingInterval));
+
 wss.on("connection", (ws) => {
   try {
+    (ws as any)._cairoAlive = true;
+    ws.on("pong", () => { (ws as any)._cairoAlive = true; });
+
     ws.send(JSON.stringify({ type: "state", ...cairoState }));
     connectedClients.add(ws);
     ws.on("close", () => connectedClients.delete(ws));
