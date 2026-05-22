@@ -110,24 +110,45 @@ function cosineSimilarity(a: number[], b: number[]): number {
 async function searchEmbeddingsInMemory(
   userId: string,
   queryVector: number[],
-  maxResults: number
+  maxResults: number,
+  nameHints: string[] = []
 ): Promise<Array<{ name: string; url: string; type: string; source: string; section: string; text: string; score: number }>> {
   const col = await embeddingsCol();
   const uid = new ObjectId(userId);
 
-  // Fetch up to 200 Drive docs + up to 100 Gmail docs separately so Gmail is never
-  // crowded out by the larger Drive corpus (Render free tier: 512 MB RAM limit).
-  const [driveDocs, gmailDocs] = await Promise.all([
+  // Fetch up to 200 Drive docs + up to 200 Gmail docs.
+  // If nameHints provided, also fetch docs whose name matches the hint (for person searches).
+  const baseQuery = [
     col.find({ user_id: uid, source: { $ne: 'gmail' } })
       .sort({ indexed_at: -1 }).limit(200)
       .project({ name: 1, url: 1, type: 1, source: 1, section: 1, text: 1, embedding: 1 })
       .toArray(),
     col.find({ user_id: uid, source: 'gmail' })
-      .sort({ indexed_at: -1 }).limit(100)
+      .sort({ indexed_at: -1 }).limit(200)
       .project({ name: 1, url: 1, type: 1, source: 1, section: 1, text: 1, embedding: 1 })
       .toArray(),
-  ]);
-  const docs = [...driveDocs, ...gmailDocs];
+  ] as const;
+
+  const nameQuery = nameHints.length > 0
+    ? col.find({
+        user_id: uid,
+        name: { $regex: nameHints.map(h => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), $options: 'i' },
+      })
+      .limit(50)
+      .project({ name: 1, url: 1, type: 1, source: 1, section: 1, text: 1, embedding: 1 })
+      .toArray()
+    : Promise.resolve([]);
+
+  const [driveDocs, gmailDocs, nameDocs] = await Promise.all([...baseQuery, nameQuery]);
+
+  // Merge, dedup by _id
+  const seenIds = new Set<string>();
+  const docs = [...driveDocs, ...gmailDocs, ...nameDocs].filter(d => {
+    const id = String(d._id);
+    if (seenIds.has(id)) return false;
+    seenIds.add(id);
+    return true;
+  });
 
   if (docs.length === 0) return [];
 
@@ -145,11 +166,11 @@ async function searchEmbeddingsInMemory(
     .sort((a, b) => b.score - a.score);
 
   // Deduplicate by name+url, keep highest score
-  const seen = new Set<string>();
+  const seenKeys = new Set<string>();
   const deduped = scored.filter((r) => {
     const key = `${r.name}::${r.url}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
+    if (seenKeys.has(key)) return false;
+    seenKeys.add(key);
     return true;
   });
 
@@ -163,6 +184,30 @@ export interface RagHit {
   source: string;
 }
 
+/** Extract probable proper nouns (capitalized words ≥4 chars, not at sentence start) */
+function extractNameHints(query: string): string[] {
+  const words = query.split(/\s+/);
+  const hints: string[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i].replace(/[^a-záéíóúüñA-ZÁÉÍÓÚÜÑ]/g, '');
+    // Capitalized, ≥4 chars, not the very first word (sentence start)
+    if (w.length >= 3 && w[0] === w[0].toUpperCase() && w[0] !== w[0].toLowerCase() && i > 0) {
+      hints.push(w);
+    }
+  }
+  // Also try full 2-word combinations (e.g. "Ariel Saban")
+  for (let i = 0; i < words.length - 1; i++) {
+    const a = words[i].replace(/[^a-záéíóúüñA-ZÁÉÍÓÚÜÑ]/g, '');
+    const b = words[i + 1].replace(/[^a-záéíóúüñA-ZÁÉÍÓÚÜÑ]/g, '');
+    if (a.length >= 3 && b.length >= 3 &&
+        a[0] === a[0].toUpperCase() && a[0] !== a[0].toLowerCase() &&
+        b[0] === b[0].toUpperCase() && b[0] !== b[0].toLowerCase()) {
+      hints.push(`${a} ${b}`);
+    }
+  }
+  return [...new Set(hints)];
+}
+
 export async function searchEmbeddings(
   userId: string,
   query: string,
@@ -170,6 +215,8 @@ export async function searchEmbeddings(
 ): Promise<{ context: string; items: RagHit[] }> {
   const config = getConfig();
   const openai = new OpenAI({ apiKey: config.llm.openai.api_key });
+
+  const nameHints = extractNameHints(query);
 
   const embeddingRes = await openai.embeddings.create({
     model: 'text-embedding-3-small',
@@ -190,8 +237,8 @@ export async function searchEmbeddings(
           index: config.mongodb.vector_index ?? 'vector_index',
           path: 'embedding',
           queryVector,
-          numCandidates: maxResults * 15,
-          limit: maxResults * 4,
+          numCandidates: maxResults * 20,
+          limit: maxResults * 5,
           filter: { user_id: new ObjectId(userId) },
         },
       },
@@ -205,24 +252,49 @@ export async function searchEmbeddings(
     const seen = new Set<string>();
     results = raw
       .filter((r) => { const k = `${r.name}::${r.url}`; if (seen.has(k)) return false; seen.add(k); return true; })
-      .slice(0, maxResults)
+      .slice(0, maxResults * 2)
       .map((r) => ({ name: String(r.name ?? ''), url: String(r.url ?? ''), type: String(r.type ?? ''), source: String(r.source ?? ''), section: String(r.section ?? ''), text: String(r.text ?? ''), score: r.score ?? 0 }));
 
-    console.log(`[RAG] Atlas vector search: ${results.length} results`);
+    console.log(`[RAG] Atlas vector search: ${results.length} results, name hints: ${nameHints.join(', ') || 'none'}`);
+
+    // Supplement with name-based search when proper nouns detected
+    if (nameHints.length > 0) {
+      const pattern = nameHints.map(h => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+      const nameMatches = await col
+        .find({
+          user_id: new ObjectId(userId),
+          name: { $regex: pattern, $options: 'i' },
+        })
+        .limit(20)
+        .project({ name: 1, url: 1, type: 1, source: 1, section: 1, text: 1, embedding: 1 })
+        .toArray();
+
+      for (const doc of nameMatches) {
+        const k = `${doc.name}::${doc.url}`;
+        if (!seen.has(k)) {
+          seen.add(k);
+          const score = Array.isArray(doc.embedding)
+            ? cosineSimilarity(queryVector, doc.embedding as number[])
+            : 0.3; // assign a baseline score for exact name matches
+          results.push({ name: String(doc.name ?? ''), url: String(doc.url ?? ''), type: String(doc.type ?? ''), source: String(doc.source ?? ''), section: String(doc.section ?? ''), text: String(doc.text ?? ''), score });
+        }
+      }
+      if (nameMatches.length > 0) console.log(`[RAG] Name hint search added ${nameMatches.length} docs for: ${nameHints.join(', ')}`);
+    }
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
     // Only warn once per process start to avoid log spam
     if (!(searchEmbeddings as any)._warnedFallback) {
-      console.warn(`[RAG] Atlas vector index not found — using in-memory fallback (limited to 300 docs). Create a vector index named "${config.mongodb.vector_index}" in Atlas to fix this.`);
+      console.warn(`[RAG] Atlas vector index not found — using in-memory fallback. Create a vector index named "${config.mongodb.vector_index ?? 'vector_index'}" in Atlas.`);
       (searchEmbeddings as any)._warnedFallback = true;
     }
-    results = await searchEmbeddingsInMemory(userId, queryVector, maxResults);
+    results = await searchEmbeddingsInMemory(userId, queryVector, maxResults, nameHints);
   }
 
   if (results.length === 0) return { context: '', items: [] };
 
-  // Only include results with decent similarity
-  const filtered = results.filter((r) => r.score > 0.25);
+  // Emails use a lower threshold (0.18) since email subjects are short and can score lower
+  // than long documents even when highly relevant.
+  const filtered = results.filter((r) => r.score > (r.source === 'gmail' ? 0.18 : 0.25));
   if (filtered.length === 0) return { context: '', items: [] };
 
   const lines = filtered.map((r, i) => {
