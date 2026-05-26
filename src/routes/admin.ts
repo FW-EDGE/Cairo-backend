@@ -181,6 +181,68 @@ router.delete('/admin/users/:id/embeddings', requireAdmin, async (req: Request, 
 });
 
 /**
+ * POST /admin/users/:id/deduplicate
+ * Remove duplicate embeddings for a user, keeping only the most recent per file+chunk.
+ * Returns the number of deleted duplicates. Admin only.
+ */
+router.post('/admin/users/:id/deduplicate', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const col = await embeddingsCol();
+    const uid = new ObjectId(req.params.id);
+    let deleted = 0;
+
+    // ── Drive: deduplicate by (file_id, section) ──────────────────────────
+    const driveDups = await col.aggregate([
+      { $match: { user_id: uid, source: 'drive', file_id: { $exists: true, $ne: null } } },
+      { $group: { _id: { file_id: '$file_id', section: '$section' }, ids: { $push: '$_id' }, count: { $sum: 1 } } },
+      { $match: { count: { $gt: 1 } } },
+    ]).toArray();
+
+    for (const group of driveDups) {
+      const latest = await col.findOne(
+        { user_id: uid, file_id: group._id.file_id, section: group._id.section },
+        { sort: { indexed_at: -1 }, projection: { _id: 1 } }
+      );
+      if (!latest) continue;
+      const r = await col.deleteMany({
+        user_id: uid,
+        file_id: group._id.file_id,
+        section: group._id.section,
+        _id: { $ne: latest._id },
+      });
+      deleted += r.deletedCount;
+    }
+
+    // ── Gmail: deduplicate by message_id ──────────────────────────────────
+    const gmailDups = await col.aggregate([
+      { $match: { user_id: uid, source: 'gmail', message_id: { $exists: true, $ne: null } } },
+      { $group: { _id: '$message_id', ids: { $push: '$_id' }, count: { $sum: 1 } } },
+      { $match: { count: { $gt: 1 } } },
+    ]).toArray();
+
+    for (const group of gmailDups) {
+      const latest = await col.findOne(
+        { user_id: uid, message_id: group._id },
+        { sort: { indexed_at: -1 }, projection: { _id: 1 } }
+      );
+      if (!latest) continue;
+      const r = await col.deleteMany({
+        user_id: uid,
+        message_id: group._id,
+        _id: { $ne: latest._id },
+      });
+      deleted += r.deletedCount;
+    }
+
+    console.log(`[Admin] Deduplicated user ${req.params.id}: removed ${deleted} duplicate embeddings`);
+    res.json({ ok: true, deleted, drive_groups: driveDups.length, gmail_groups: gmailDups.length });
+  } catch (err) {
+    console.error('[Admin] POST /deduplicate error:', err);
+    res.status(500).json({ error: 'Failed to deduplicate' });
+  }
+});
+
+/**
  * DELETE /admin/users/:id/drive-cache
  * Wipe drive cache for a user. Admin only.
  */

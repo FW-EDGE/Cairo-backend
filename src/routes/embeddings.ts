@@ -2,33 +2,36 @@ import { Router, Request, Response } from 'express';
 import { ObjectId } from 'mongodb';
 import { requireUser } from '../auth/middleware.js';
 import { embeddingsCol } from '../db/client.js';
-import { runFullIndex } from '../services/embeddingsIndexer.js';
 import { TIER_LIMITS, Tier } from '../db/users.js';
+import { enqueueIndex } from '../services/indexingQueue.js';
 
 const router = Router();
 
 // POST /embeddings/index
+// Adds the user to the shared MongoDB job queue.
+// The worker (started at server boot) picks it up respecting MAX_CONCURRENT.
+// Returns immediately — progress is broadcast via WebSocket.
 router.post('/embeddings/index', requireUser, async (req: Request, res: Response) => {
   try {
     const user = req.user!;
     if (!user.google_tokens) { res.status(403).json({ error: 'Google account not connected' }); return; }
 
-    const tier = (user.tier ?? 'free') as Tier;
+    const tier   = (user.tier ?? 'free') as Tier;
     const limits = TIER_LIMITS[tier];
 
-    setImmediate(async () => {
-      try {
-        const result = await runFullIndex(user._id, user.google_tokens!, tier);
-        console.log(`[Embeddings] Full index complete for user ${user._id} (${tier}):`, result);
-      } catch (err) {
-        console.error(`[Embeddings] Full index error for user ${user._id}:`, err);
-      }
-    });
+    const outcome = await enqueueIndex(user._id, tier);
 
-    res.json({ ok: true, message: 'Indexing started in background', tier, limits });
+    res.json({
+      ok:              true,
+      message:         outcome === 'queued' ? 'Indexing queued' : 'Indexing already in progress',
+      already_running: outcome !== 'queued',
+      outcome,
+      tier,
+      limits,
+    });
   } catch (err) {
     console.error('[Embeddings] POST /embeddings/index error:', err);
-    res.status(500).json({ error: 'Failed to start indexing' });
+    res.status(500).json({ error: 'Failed to queue indexing' });
   }
 });
 
@@ -45,7 +48,7 @@ router.get('/embeddings/status', requireUser, async (req: Request, res: Response
     const counts: Record<string, number> = {};
     let total = 0;
     for (const r of results) { counts[r._id as string] = r.count as number; total += r.count as number; }
-    const tier = (user.tier ?? 'free') as Tier;
+    const tier   = (user.tier ?? 'free') as Tier;
     const limits = TIER_LIMITS[tier];
     const maxTotal = limits.maxDriveEmbeddings + limits.maxEmails;
     res.json({ counts, total, tier, limits, maxTotal, usage: user.usage ?? null, token_usage: user.token_usage ?? null });

@@ -287,14 +287,14 @@ export async function indexDriveForUser(
           indexed_at: now,
         }));
 
-        // Delete OLD chunks only for the specific files being re-indexed
+        // Delete ALL existing chunks for the files in this batch BEFORE inserting new ones.
+        // No indexed_at filter — avoids duplicates regardless of clock resolution or prior failures.
         const fileIdsInBatch = [...new Set(docsToInsert.map(d => d.file_id))];
         if (fileIdsInBatch.length > 0) {
           await col.deleteMany({
             user_id: uid,
             source:  'drive',
             file_id: { $in: fileIdsInBatch },
-            indexed_at: { $lt: now },
           });
         }
 
@@ -448,8 +448,15 @@ export async function indexGmailForUser(
       indexed_at: new Date(),
     }));
 
-    // Pure insert — never delete existing emails
-    await col.insertMany(embedDocs);
+    // Upsert by message_id — idempotent, prevents duplicates even if indexedMsgIds check was fooled
+    const bulkOps = embedDocs.map(doc => ({
+      updateOne: {
+        filter: { user_id: uid, message_id: doc.message_id },
+        update: { $set: doc },
+        upsert: true,
+      },
+    }));
+    await col.bulkWrite(bulkOps, { ordered: false });
     totalInserted += embedDocs.length;
     console.log(`[Embeddings] Gmail: +${embedDocs.length} (${totalInserted}/${newMessages.length} new)`);
 

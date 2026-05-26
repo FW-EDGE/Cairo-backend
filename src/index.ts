@@ -17,6 +17,7 @@ import { getConfig } from "./config.js";
 import { ensureIndexes } from "./db/oauthStates.js";
 import { startHeartbeatMonitor, cairoState, connectedClients } from "./websocket.js";
 import { startScheduler } from "./services/scheduler.js";
+import { ensureJobIndexes, startIndexWorker } from "./services/indexingQueue.js";
 import authRouter from "./routes/auth.js";
 import stateRouter from "./routes/state.js";
 import calendarRouter from "./routes/calendar.js";
@@ -132,8 +133,10 @@ async function start(): Promise<void> {
   // MongoDB + background services (non-fatal if slow)
   try {
     await ensureIndexes();
+    await ensureJobIndexes();
     startHeartbeatMonitor();
     startScheduler();
+    startIndexWorker();
     console.log("[CAIRO] All services started");
   } catch (err) {
     console.error("[CAIRO] Post-listen startup error:", err);
