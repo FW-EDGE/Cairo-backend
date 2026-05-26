@@ -190,6 +190,39 @@ export interface RagHit {
   source: string;
 }
 
+/**
+ * Detect temporal intent and return a date range filter.
+ * Returns null when the query has no temporal keywords.
+ */
+function extractTemporalFilter(query: string): { start: Date; end: Date; label: string } | null {
+  const q = query.toLowerCase();
+
+  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const now  = new Date();
+  const today = startOfDay(now);
+
+  if (/\bhoy\b|\btoday\b/.test(q)) {
+    return { start: today, end: new Date(today.getTime() + 86_400_000), label: 'hoy' };
+  }
+  if (/\bayer\b|\byesterday\b/.test(q)) {
+    const yesterday = new Date(today.getTime() - 86_400_000);
+    return { start: yesterday, end: today, label: 'ayer' };
+  }
+  if (/esta semana|this week/.test(q)) {
+    return { start: new Date(today.getTime() - 7 * 86_400_000), end: new Date(), label: 'esta semana' };
+  }
+  if (/este mes|this month/.test(q)) {
+    return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: new Date(), label: 'este mes' };
+  }
+  // "últimos N días / last N days"
+  const daysMatch = q.match(/últimos?\s+(\d+)\s+días?|last\s+(\d+)\s+days?/);
+  if (daysMatch) {
+    const n = parseInt(daysMatch[1] ?? daysMatch[2], 10);
+    return { start: new Date(today.getTime() - n * 86_400_000), end: new Date(), label: `últimos ${n} días` };
+  }
+  return null;
+}
+
 /** Extract probable proper nouns (capitalized words ≥4 chars, not at sentence start) */
 function extractNameHints(query: string): string[] {
   const words = query.split(/\s+/);
@@ -212,6 +245,78 @@ function extractNameHints(query: string): string[] {
     }
   }
   return [...new Set(hints)];
+}
+
+/**
+ * Fetch Gmail embeddings within a date range, sorted newest-first.
+ * Uses `received_at` when available; falls back to a text-regex parse
+ * of the "Fecha:" line for older docs that predate the field.
+ */
+async function fetchEmailsByDateRange(
+  userId: string,
+  start: Date,
+  end: Date,
+  limit = 50,
+): Promise<Array<{ name: string; url: string; type: string; source: string; section: string; text: string; from_name?: string }>> {
+  const col = await embeddingsCol();
+  const uid = new ObjectId(userId);
+
+  // Primary: docs that have the received_at field populated
+  const withDate = await col
+    .find({ user_id: uid, source: 'gmail', received_at: { $gte: start, $lt: end } })
+    .sort({ received_at: -1 })
+    .limit(limit)
+    .project({ name: 1, url: 1, type: 1, source: 1, section: 1, text: 1, from_name: 1 })
+    .toArray();
+
+  if (withDate.length >= limit) {
+    return withDate.map(d => ({
+      name:      String(d.name ?? ''),
+      url:       String(d.url ?? ''),
+      type:      String(d.type ?? ''),
+      source:    'gmail',
+      section:   String(d.section ?? ''),
+      text:      String(d.text ?? ''),
+      from_name: d.from_name ? String(d.from_name) : undefined,
+    }));
+  }
+
+  // Fallback: older docs without received_at — parse "Fecha:" line in text.
+  // The text format is: "De: ...\nFecha: Mon, 26 May 2026 ...\nAsunto: ..."
+  // We load a batch of recent-indexed docs and post-filter by parsed date.
+  const seenUrls = new Set(withDate.map(d => String(d.url)));
+  const fallbackDocs = await col
+    .find({ user_id: uid, source: 'gmail', received_at: { $exists: false } })
+    .sort({ indexed_at: -1 })
+    .limit(300)
+    .project({ name: 1, url: 1, type: 1, source: 1, section: 1, text: 1, from_name: 1 })
+    .toArray();
+
+  const fallbackFiltered = fallbackDocs.filter(d => {
+    const url = String(d.url ?? '');
+    if (seenUrls.has(url)) return false;
+    const text = String(d.text ?? '');
+    const m = text.match(/^Fecha:\s*(.+)$/m);
+    if (!m) return false;
+    const date = new Date(m[1]);
+    if (isNaN(date.getTime())) return false;
+    return date >= start && date < end;
+  });
+
+  const combined = [
+    ...withDate,
+    ...fallbackFiltered.slice(0, limit - withDate.length),
+  ];
+
+  return combined.map(d => ({
+    name:      String(d.name ?? ''),
+    url:       String(d.url ?? ''),
+    type:      String(d.type ?? ''),
+    source:    'gmail',
+    section:   String(d.section ?? ''),
+    text:      String(d.text ?? ''),
+    from_name: d.from_name ? String(d.from_name) : undefined,
+  }));
 }
 
 export async function searchEmbeddings(
@@ -361,21 +466,44 @@ export async function buildContextBlock(
       return { context: '', items: [] };
     }
 
-    const searchQuery = buildSearchQuery(message, history);
+    const searchQuery    = buildSearchQuery(message, history);
+    const temporalFilter = extractTemporalFilter(message);
 
     if (tier === 'free') {
       const driveResult = await searchDriveCache(userId, searchQuery).catch(() => ({ context: '', items: [] }));
       contextParts.push(driveResult.context);
       allItems = driveResult.items;
     } else {
+      // When a temporal keyword is detected, fetch emails by date range directly
+      // instead of relying solely on vector similarity (which ignores recency).
+      if (temporalFilter) {
+        const dateEmails = await fetchEmailsByDateRange(userId, temporalFilter.start, temporalFilter.end)
+          .catch(() => []);
+        if (dateEmails.length > 0) {
+          const header = `### Correos de ${temporalFilter.label} (${dateEmails.length} encontrados)\n\n`;
+          const lines  = dateEmails.map((e, i) => {
+            const sender = e.from_name ? ` — de: ${e.from_name}` : '';
+            const header = `[${i + 1}] 📧 **${e.name}**${sender}${e.url ? ` (${e.url})` : ''}`;
+            const excerpt = e.text ? `\n${String(e.text).slice(0, 500)}` : '';
+            return `${header}${excerpt}`;
+          });
+          contextParts.push(header + lines.join('\n\n---\n\n'));
+          allItems.push(...dateEmails.map(e => ({ name: e.name, url: e.url, type: e.type, source: e.source })));
+          console.log(`[RAG] Temporal filter "${temporalFilter.label}": ${dateEmails.length} emails fetched`);
+        } else {
+          console.log(`[RAG] Temporal filter "${temporalFilter.label}": 0 emails found (may need re-indexing)`);
+        }
+      }
+
+      // Always run vector search too (covers non-email content and supplements temporal results)
       const embedResult = await searchEmbeddings(userId, searchQuery).catch((err) => {
         console.warn('[RAG] Vector search failed:', err?.message ?? err);
         return { context: '', items: [] as RagHit[] };
       });
       const driveResult = await searchDriveCache(userId, searchQuery).catch(() => ({ context: '', items: [] as RagHit[] }));
-      
-      contextParts = [embedResult.context, driveResult.context].filter(Boolean);
-      allItems = [...embedResult.items, ...driveResult.items];
+
+      contextParts.push(...[embedResult.context, driveResult.context].filter(Boolean));
+      allItems.push(...embedResult.items, ...driveResult.items);
     }
 
     // Filter items and context based on intent

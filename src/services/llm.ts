@@ -31,6 +31,46 @@ export function getModel(): string {
   return config.llm.openai.model || 'gpt-4o';
 }
 
+export const SEARCH_GMAIL_TOOL = {
+  type: 'function',
+  function: {
+    name: 'search_gmail',
+    description: 'Busca emails en Gmail en tiempo real. Usá la sintaxis de búsqueda de Gmail: "from:nombre", "subject:tema", "after:YYYY/MM/DD", "before:YYYY/MM/DD", "is:unread", "has:attachment", etc. Podés combinar filtros. Usá esta tool cuando el usuario pregunta por emails específicos, de alguien en particular, de cierta fecha, o con cierto tema.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Consulta de búsqueda Gmail. Ejemplos: "from:juan after:2024/05/20", "subject:reunión is:unread", "from:ariel saban"',
+        },
+        max_results: {
+          type: 'number',
+          description: 'Cantidad máxima de emails a retornar (default: 10, máximo: 20)',
+        },
+      },
+      required: ['query'],
+    },
+  },
+} as const;
+
+export const READ_EMAIL_TOOL = {
+  type: 'function',
+  function: {
+    name: 'read_email',
+    description: 'Lee el contenido completo de un email específico dado su ID de Gmail. Usá esta tool cuando ya tenés el ID del mensaje y querés leer su contenido completo.',
+    parameters: {
+      type: 'object',
+      properties: {
+        message_id: {
+          type: 'string',
+          description: 'El ID del mensaje de Gmail (obtenido de una búsqueda previa)',
+        },
+      },
+      required: ['message_id'],
+    },
+  },
+} as const;
+
 export const SEARCH_DRIVE_TOOL = {
   type: 'function',
   function: {
@@ -151,11 +191,82 @@ export async function* getLlmStream(
     stream_options: { include_usage: true },
   });
   for await (const chunk of stream) {
-    // Last chunk carries the usage summary when stream_options.include_usage is true
     if (chunk.usage && onUsage) {
       onUsage({ input: chunk.usage.prompt_tokens ?? 0, output: chunk.usage.completion_tokens ?? 0 });
     }
     const token = chunk.choices[0]?.delta?.content;
     if (token) yield token;
+  }
+}
+
+export type StreamEvent =
+  | { type: 'delta';      content: string }
+  | { type: 'tool_calls'; calls: Array<{ id: string; function: { name: string; arguments: string } }> }
+  | { type: 'usage';      usage: LlmUsage };
+
+/**
+ * Streaming call that also handles tool calls.
+ *
+ * Yields:
+ *  - { type: 'delta', content }     — text tokens as they arrive (true streaming)
+ *  - { type: 'tool_calls', calls }  — when the model wants to call tools
+ *  - { type: 'usage', usage }       — token counts at end of stream
+ *
+ * The caller should:
+ *  1. Forward 'delta' events to the SSE client.
+ *  2. On 'tool_calls': execute the tools, push results to messages, call again.
+ *  3. Use 'usage' for billing.
+ */
+export async function* getLlmStreamWithTools(
+  messages:    any[],
+  contextBlock: string,
+  tools:        any[],
+): AsyncGenerator<StreamEvent> {
+  const client = getOpenAI();
+  const stream = await client.chat.completions.create({
+    model:          getModel(),
+    messages:       buildFormattedMessages(messages, contextBlock),
+    max_tokens:     4096,
+    temperature:    0.5,
+    tools:          tools.length > 0 ? tools : undefined,
+    stream:         true,
+    stream_options: { include_usage: true },
+  });
+
+  // Accumulate tool call fragments (the model streams arguments character by character)
+  const tcAcc: Record<number, { id: string; name: string; arguments: string }> = {};
+  let assistantContent = '';
+
+  for await (const chunk of stream) {
+    if (chunk.usage) {
+      yield { type: 'usage', usage: { input: chunk.usage.prompt_tokens ?? 0, output: chunk.usage.completion_tokens ?? 0 } };
+    }
+
+    const delta = chunk.choices[0]?.delta;
+    if (!delta) continue;
+
+    // Stream text tokens directly to client
+    if (delta.content) {
+      assistantContent += delta.content;
+      yield { type: 'delta', content: delta.content };
+    }
+
+    // Accumulate tool call fragments
+    if (delta.tool_calls) {
+      for (const tc of delta.tool_calls) {
+        if (!tcAcc[tc.index]) tcAcc[tc.index] = { id: '', name: '', arguments: '' };
+        if (tc.id)                tcAcc[tc.index].id        += tc.id;
+        if (tc.function?.name)    tcAcc[tc.index].name      += tc.function.name;
+        if (tc.function?.arguments) tcAcc[tc.index].arguments += tc.function.arguments;
+      }
+    }
+  }
+
+  const calls = Object.values(tcAcc).filter(tc => tc.name);
+  if (calls.length > 0) {
+    yield {
+      type:  'tool_calls',
+      calls: calls.map(tc => ({ id: tc.id, function: { name: tc.name, arguments: tc.arguments } })),
+    };
   }
 }

@@ -318,7 +318,7 @@ export async function indexDriveForUser(
 }
 
 /** Extract plain text from a Gmail message part tree (recursive). */
-function extractGmailBody(payload: any, maxChars = 2000): string {
+export function extractGmailBody(payload: any, maxChars = 2000): string {
   if (!payload) return '';
   // If this part has a body with data, decode it
   if (payload.body?.data) {
@@ -405,7 +405,7 @@ export async function indexGmailForUser(
 
   for (let i = 0; i < newMessages.length; i += EMBED_BATCH) {
     const slice = newMessages.slice(i, i + EMBED_BATCH);
-    const emailDocs: Array<{ message_id: string; name: string; from_name: string; url: string; text: string }> = [];
+    const emailDocs: Array<{ message_id: string; name: string; from_name: string; url: string; text: string; received_at: Date | undefined }> = [];
 
     for (let j = 0; j < slice.length; j += FETCH_CONCURRENCY) {
       const subBatch = slice.slice(j, j + FETCH_CONCURRENCY);
@@ -422,13 +422,16 @@ export async function indexGmailForUser(
           const date     = headers.find((h: any) => h.name === 'Date')?.value ?? '';
           const body     = extractGmailBody(msg.data.payload) || (msg.data.snippet ?? '');
           // Extract human-readable sender name: "John Doe <john@example.com>" → "John Doe"
-          const fromName = from.match(/^([^<]+)</)?.[1]?.trim() ?? from.split('@')[0];
+          const fromName    = from.match(/^([^<]+)</)?.[1]?.trim() ?? from.split('@')[0];
+          // Parse the email's actual send date from the RFC 2822 Date header
+          const receivedAt  = date ? (() => { const d = new Date(date); return isNaN(d.getTime()) ? undefined : d; })() : undefined;
           emailDocs.push({
-            message_id: m.id!,
-            name:       subject,
-            from_name:  fromName,
-            url:        `https://mail.google.com/mail/u/0/#inbox/${m.id}`,
-            text:       `De: ${from}\nFecha: ${date}\nAsunto: ${subject}\n\n${body}`,
+            message_id:  m.id!,
+            name:        subject,
+            from_name:   fromName,
+            url:         `https://mail.google.com/mail/u/0/#inbox/${m.id}`,
+            text:        `De: ${from}\nFecha: ${date}\nAsunto: ${subject}\n\n${body}`,
+            received_at: receivedAt,
           });
         } catch { /* skip individual failures */ }
       }));
@@ -439,17 +442,18 @@ export async function indexGmailForUser(
     const { vectors, tokensUsed: embTok } = await batchEmbeddings(openai, emailDocs.map((d) => d.text));
     if (embTok > 0) recordTokenUsage(userId, { embedding_tokens: embTok }).catch(() => {});
     const embedDocs = emailDocs.map((d, idx) => ({
-      user_id:    uid,
-      message_id: d.message_id,
-      name:       d.name,
-      from_name:  d.from_name,
-      url:        d.url,
-      type:       'email',
-      source:     'gmail',
-      text:       d.text,
-      preview:    d.text.length > 160 ? d.text.slice(0, 160).trimEnd() + '…' : d.text,
-      embedding:  vectors[idx],
-      indexed_at: new Date(),
+      user_id:     uid,
+      message_id:  d.message_id,
+      name:        d.name,
+      from_name:   d.from_name,
+      url:         d.url,
+      type:        'email',
+      source:      'gmail',
+      text:        d.text,
+      preview:     d.text.length > 160 ? d.text.slice(0, 160).trimEnd() + '…' : d.text,
+      embedding:   vectors[idx],
+      indexed_at:  new Date(),
+      ...(d.received_at ? { received_at: d.received_at } : {}),
     }));
 
     // Upsert by message_id — idempotent, prevents duplicates even if indexedMsgIds check was fooled
