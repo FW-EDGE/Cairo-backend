@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
+import { ObjectId } from 'mongodb';
 import { requireAdmin } from '../auth/middleware.js';
-import { usersCol } from '../db/client.js';
+import { usersCol, embeddingsCol, driveCacheCol } from '../db/client.js';
 import { TIER_LIMITS, Tier, serialize } from '../db/users.js';
 
 const router = Router();
@@ -93,12 +94,106 @@ router.patch('/admin/users/:id/tier', requireAdmin, async (req: Request, res: Re
       return;
     }
     const col = await usersCol();
-    const { ObjectId } = await import('mongodb');
     await col.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { tier } });
     res.json({ ok: true });
   } catch (err) {
     console.error('[Admin] PATCH tier error:', err);
     res.status(500).json({ error: 'Failed to update tier' });
+  }
+});
+
+/**
+ * GET /admin/storage
+ * Returns per-user embedding counts and estimated storage usage.
+ */
+router.get('/admin/storage', requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const col = await embeddingsCol();
+
+    // Group by user_id + source
+    const pipeline = [
+      {
+        $group: {
+          _id: { user_id: '$user_id', source: '$source' },
+          count: { $sum: 1 },
+          // Rough text bytes: avg text length
+          text_bytes: { $sum: { $strLenBytes: { $ifNull: ['$text', ''] } } },
+        },
+      },
+      { $sort: { count: -1 } },
+    ];
+
+    const rows = await col.aggregate(pipeline).toArray();
+
+    // Aggregate by user
+    const byUser = new Map<string, { drive: number; gmail: number; other: number; text_bytes: number }>();
+    for (const r of rows) {
+      const uid = String(r._id.user_id);
+      const src = String(r._id.source ?? 'other');
+      if (!byUser.has(uid)) byUser.set(uid, { drive: 0, gmail: 0, other: 0, text_bytes: 0 });
+      const u = byUser.get(uid)!;
+      if (src === 'gmail')      u.gmail       += r.count as number;
+      else if (src === 'drive') u.drive       += r.count as number;
+      else                      u.other       += r.count as number;
+      u.text_bytes += r.text_bytes as number;
+    }
+
+    const VECTOR_BYTES_PER_DOC = 1536 * 8; // float64
+    const result = Array.from(byUser.entries()).map(([uid, v]) => {
+      const total = v.drive + v.gmail + v.other;
+      const vector_mb = (total * VECTOR_BYTES_PER_DOC) / 1_048_576;
+      const text_mb   = v.text_bytes / 1_048_576;
+      return {
+        user_id:   uid,
+        drive:     v.drive,
+        gmail:     v.gmail,
+        other:     v.other,
+        total,
+        vector_mb: +vector_mb.toFixed(1),
+        text_mb:   +text_mb.toFixed(1),
+        total_mb:  +(vector_mb + text_mb).toFixed(1),
+      };
+    }).sort((a, b) => b.total - a.total);
+
+    const grand_total_mb = result.reduce((s, r) => s + r.total_mb, 0);
+    res.json({ users: result, grand_total_mb: +grand_total_mb.toFixed(1) });
+  } catch (err) {
+    console.error('[Admin] GET /admin/storage error:', err);
+    res.status(500).json({ error: 'Failed to fetch storage stats' });
+  }
+});
+
+/**
+ * DELETE /admin/users/:id/embeddings
+ * Wipe all embeddings for a user (frees Atlas storage). Admin only.
+ */
+router.delete('/admin/users/:id/embeddings', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const col = await embeddingsCol();
+    const uid = new ObjectId(req.params.id);
+    const result = await col.deleteMany({ user_id: uid });
+    console.log(`[Admin] Deleted ${result.deletedCount} embeddings for user ${req.params.id}`);
+    res.json({ ok: true, deleted: result.deletedCount });
+  } catch (err) {
+    console.error('[Admin] DELETE embeddings error:', err);
+    res.status(500).json({ error: 'Failed to delete embeddings' });
+  }
+});
+
+/**
+ * DELETE /admin/users/:id/drive-cache
+ * Wipe drive cache for a user. Admin only.
+ */
+router.delete('/admin/users/:id/drive-cache', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const col  = await driveCacheCol();
+    const uid  = new ObjectId(req.params.id);
+    const result = await col.deleteMany({ user_id: uid });
+    console.log(`[Admin] Deleted drive cache for user ${req.params.id}`);
+    res.json({ ok: true, deleted: result.deletedCount });
+  } catch (err) {
+    console.error('[Admin] DELETE drive-cache error:', err);
+    res.status(500).json({ error: 'Failed to delete drive cache' });
   }
 });
 
