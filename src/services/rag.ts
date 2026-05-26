@@ -130,13 +130,19 @@ async function searchEmbeddingsInMemory(
   ] as const;
 
   const nameQuery = nameHints.length > 0
-    ? col.find({
-        user_id: uid,
-        name: { $regex: nameHints.map(h => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), $options: 'i' },
-      })
-      .limit(50)
-      .project({ name: 1, url: 1, type: 1, source: 1, section: 1, text: 1, embedding: 1 })
-      .toArray()
+    ? (() => {
+        const pattern = nameHints.map(h => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+        const re = { $regex: pattern, $options: 'i' };
+        return col.find({
+          user_id: uid,
+          // Search name (Drive filenames, email subjects), from_name (email sender),
+          // and text body as fallback for older docs without from_name.
+          $or: [{ name: re }, { from_name: re }, { text: re }],
+        })
+        .limit(50)
+        .project({ name: 1, url: 1, type: 1, source: 1, section: 1, text: 1, from_name: 1, embedding: 1 })
+        .toArray();
+      })()
     : Promise.resolve([]);
 
   const [driveDocs, gmailDocs, nameDocs] = await Promise.all([...baseQuery, nameQuery]);
@@ -257,16 +263,18 @@ export async function searchEmbeddings(
 
     console.log(`[RAG] Atlas vector search: ${results.length} results, name hints: ${nameHints.join(', ') || 'none'}`);
 
-    // Supplement with name-based search when proper nouns detected
+    // Supplement with name-based search when proper nouns detected.
+    // Searches: name (subject/filename), from_name (email sender), text body (fallback for old docs).
     if (nameHints.length > 0) {
       const pattern = nameHints.map(h => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+      const re = { $regex: pattern, $options: 'i' };
       const nameMatches = await col
         .find({
           user_id: new ObjectId(userId),
-          name: { $regex: pattern, $options: 'i' },
+          $or: [{ name: re }, { from_name: re }, { text: re }],
         })
         .limit(20)
-        .project({ name: 1, url: 1, type: 1, source: 1, section: 1, text: 1, embedding: 1 })
+        .project({ name: 1, url: 1, type: 1, source: 1, section: 1, text: 1, from_name: 1, embedding: 1 })
         .toArray();
 
       for (const doc of nameMatches) {

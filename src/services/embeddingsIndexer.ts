@@ -405,7 +405,7 @@ export async function indexGmailForUser(
 
   for (let i = 0; i < newMessages.length; i += EMBED_BATCH) {
     const slice = newMessages.slice(i, i + EMBED_BATCH);
-    const emailDocs: Array<{ message_id: string; name: string; url: string; text: string }> = [];
+    const emailDocs: Array<{ message_id: string; name: string; from_name: string; url: string; text: string }> = [];
 
     for (let j = 0; j < slice.length; j += FETCH_CONCURRENCY) {
       const subBatch = slice.slice(j, j + FETCH_CONCURRENCY);
@@ -416,16 +416,19 @@ export async function indexGmailForUser(
             id: m.id!,
             format: 'full',
           });
-          const headers = msg.data.payload?.headers ?? [];
-          const subject = headers.find((h: any) => h.name === 'Subject')?.value ?? '(Sin asunto)';
-          const from    = headers.find((h: any) => h.name === 'From')?.value ?? '';
-          const date    = headers.find((h: any) => h.name === 'Date')?.value ?? '';
-          const body    = extractGmailBody(msg.data.payload) || (msg.data.snippet ?? '');
+          const headers  = msg.data.payload?.headers ?? [];
+          const subject  = headers.find((h: any) => h.name === 'Subject')?.value ?? '(Sin asunto)';
+          const from     = headers.find((h: any) => h.name === 'From')?.value ?? '';
+          const date     = headers.find((h: any) => h.name === 'Date')?.value ?? '';
+          const body     = extractGmailBody(msg.data.payload) || (msg.data.snippet ?? '');
+          // Extract human-readable sender name: "John Doe <john@example.com>" → "John Doe"
+          const fromName = from.match(/^([^<]+)</)?.[1]?.trim() ?? from.split('@')[0];
           emailDocs.push({
             message_id: m.id!,
-            name: subject,
-            url:  `https://mail.google.com/mail/u/0/#inbox/${m.id}`,
-            text: `De: ${from}\nFecha: ${date}\nAsunto: ${subject}\n\n${body}`,
+            name:       subject,
+            from_name:  fromName,
+            url:        `https://mail.google.com/mail/u/0/#inbox/${m.id}`,
+            text:       `De: ${from}\nFecha: ${date}\nAsunto: ${subject}\n\n${body}`,
           });
         } catch { /* skip individual failures */ }
       }));
@@ -439,6 +442,7 @@ export async function indexGmailForUser(
       user_id:    uid,
       message_id: d.message_id,
       name:       d.name,
+      from_name:  d.from_name,
       url:        d.url,
       type:       'email',
       source:     'gmail',
