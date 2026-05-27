@@ -129,21 +129,25 @@ export const LIST_CALENDAR_EVENTS_TOOL = {
   type: 'function',
   function: {
     name: 'list_calendar_events',
-    description: 'Lista los próximos eventos del calendario del usuario. Útil para ver qué reuniones tiene agendadas o para verificar disponibilidad.',
+    description: 'Lista eventos del calendario del usuario, tanto pasados como futuros. Podés filtrar por rango de fechas y buscar por email de asistente, palabras clave del título o descripción. Para buscar quién estuvo en reuniones pasadas, usá time_min y time_max apuntando al pasado junto con query.',
     parameters: {
       type: 'object',
       properties: {
         max_results: {
           type: 'number',
-          description: 'Cantidad máxima de eventos a retornar (default: 10, máximo: 25)',
+          description: 'Cantidad máxima de eventos a retornar (default: 10, máximo: 50)',
         },
         time_min: {
           type: 'string',
-          description: 'Fecha de inicio del rango en ISO 8601 (ej: "2026-05-29T00:00:00"). Por defecto: ahora.',
+          description: 'Fecha de inicio del rango en ISO 8601 (ej: "2026-03-01T00:00:00"). Para buscar eventos pasados, usá una fecha anterior a hoy.',
         },
         time_max: {
           type: 'string',
-          description: 'Fecha de fin del rango en ISO 8601 (ej: "2026-06-05T23:59:59"). Opcional.',
+          description: 'Fecha de fin del rango en ISO 8601 (ej: "2026-05-27T23:59:59"). Opcional.',
+        },
+        query: {
+          type: 'string',
+          description: 'Búsqueda de texto libre. Filtra eventos que contengan este texto en: email de asistente, nombre del asistente, título del evento o descripción. Ej: "jsolis@gruposalinas.com.mx" para buscar reuniones con esa persona.',
         },
       },
     },

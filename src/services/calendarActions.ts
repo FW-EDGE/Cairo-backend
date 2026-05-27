@@ -43,18 +43,25 @@ export async function listCalendarEvents(
   maxResults: number  = 10,
   timeMin?:   string,
   timeMax?:   string,
+  query?:     string,   // free-text search: matches attendee emails, summary, description
 ): Promise<string> {
   const auth     = tokensToClient(tokens, userId);
   const calendar = google.calendar({ version: 'v3', auth });
 
   const params: any = {
-    calendarId:  'primary',
-    maxResults:  Math.min(Math.max(maxResults, 1), 25),
+    calendarId:   'primary',
+    maxResults:   Math.min(Math.max(maxResults, 1), 50),
     singleEvents: true,
-    orderBy:     'startTime',
-    timeMin:     timeMin || new Date().toISOString(),
+    orderBy:      'startTime',
   };
+  // Only set timeMin default when NOT looking at past events (i.e. no timeMax before now)
+  if (timeMin) {
+    params.timeMin = timeMin;
+  } else if (!timeMax || new Date(timeMax) > new Date()) {
+    params.timeMin = new Date().toISOString();
+  }
   if (timeMax) params.timeMax = timeMax;
+  if (query)   params.q      = query;
 
   let res;
   try {
@@ -71,7 +78,9 @@ export async function listCalendarEvents(
   }
   const events = res.data.items ?? [];
 
-  if (events.length === 0) return 'No hay eventos en el rango indicado.';
+  if (events.length === 0) return query
+    ? `No se encontraron eventos con "${query}" en el rango indicado.`
+    : 'No hay eventos en el rango indicado.';
 
   const lines = events.map((e, i) => formatEvent(e, i));
   return `${events.length} evento(s) encontrado(s):\n\n${lines.join('\n\n---\n\n')}`;

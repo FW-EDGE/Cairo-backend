@@ -195,6 +195,7 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
                 args.max_results ?? 10,
                 args.time_min,
                 args.time_max,
+                args.query,
               );
 
             } else if (call.function.name === 'create_calendar_event') {
