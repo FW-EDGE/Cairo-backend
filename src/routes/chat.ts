@@ -61,45 +61,50 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
     });
     let customContext = `### FECHA Y HORA ACTUAL\n${nowStr} (hora de Buenos Aires)\n\n${contextBlock}`;
 
-    // ── Skills ────────────────────────────────────────────────────────────────
+    // ── Skills (granular) ─────────────────────────────────────────────────────
     // Skills default to true when not explicitly set (new users get everything on).
     const sk = (id: string) => (user.skills?.[id] ?? true) === true;
 
-    const isGmailEnabled    = sk('gmail_assistant');
-    const isCalendarEnabled = sk('calendar_management');
-    const isDriveEnabled    = sk('drive_assistant');
-    const isReportEnabled   = sk('report_generation');
-
     const tools: any[] = [];
+    const active: string[]   = [];
+    const inactive: string[] = [];
 
-    if (isGmailEnabled) {
-      tools.push(SEARCH_GMAIL_TOOL, READ_EMAIL_TOOL);
-      customContext += `\n\n### SKILL ACTIVA: ASISTENTE DE GMAIL\nPodés buscar y leer emails del usuario en tiempo real.`;
-    } else {
-      customContext += `\n\n### RESTRICCIÓN: ASISTENTE DE GMAIL DESACTIVADO\nNo podés buscar ni leer emails. Indicá al usuario que lo active desde Skills.`;
-    }
+    // Gmail
+    if (sk('gmail_search'))    { tools.push(SEARCH_GMAIL_TOOL);           active.push('buscar emails'); }
+    else                         inactive.push('buscar emails (gmail_search desactivado)');
 
-    if (isCalendarEnabled) {
-      tools.push(SEARCH_CONTACTS_TOOL, LIST_CALENDAR_EVENTS_TOOL, CREATE_CALENDAR_EVENT_TOOL);
-      customContext += `\n\n### SKILL ACTIVA: CALENDARIO Y REUNIONES\nPodés consultar la agenda, crear eventos e invitar participantes. Si no tenés el email de alguien, usá search_contacts primero.`;
-    } else {
-      customContext += `\n\n### RESTRICCIÓN: CALENDARIO DESACTIVADO\nNo podés gestionar el calendario. Indicá al usuario que lo active desde Skills.`;
-    }
+    if (sk('gmail_read'))      { tools.push(READ_EMAIL_TOOL);             active.push('leer emails completos'); }
+    else                         inactive.push('leer emails completos (gmail_read desactivado)');
 
-    if (isDriveEnabled) {
-      tools.push(SEARCH_DRIVE_TOOL, READ_FILE_TOOL);
-      customContext += `\n\n### SKILL ACTIVA: ASISTENTE DE DRIVE\nPodés buscar y leer archivos de Google Drive del usuario.`;
-    } else {
-      customContext += `\n\n### RESTRICCIÓN: ASISTENTE DE DRIVE DESACTIVADO\nNo podés acceder a Drive. Indicá al usuario que lo active desde Skills.`;
-    }
+    // Calendario
+    if (sk('contacts_search')) { tools.push(SEARCH_CONTACTS_TOOL);       active.push('buscar contactos'); }
+    else                         inactive.push('buscar contactos (contacts_search desactivado)');
 
-    if (isReportEnabled) {
+    if (sk('calendar_read'))   { tools.push(LIST_CALENDAR_EVENTS_TOOL);  active.push('ver agenda'); }
+    else                         inactive.push('ver agenda (calendar_read desactivado)');
+
+    if (sk('calendar_create')) { tools.push(CREATE_CALENDAR_EVENT_TOOL); active.push('crear eventos'); }
+    else                         inactive.push('crear eventos (calendar_create desactivado)');
+
+    // Drive
+    if (sk('drive_search'))    { tools.push(SEARCH_DRIVE_TOOL);          active.push('buscar en Drive'); }
+    else                         inactive.push('buscar en Drive (drive_search desactivado)');
+
+    if (sk('drive_read'))      { tools.push(READ_FILE_TOOL);             active.push('leer archivos de Drive'); }
+    else                         inactive.push('leer archivos de Drive (drive_read desactivado)');
+
+    // Informe
+    if (sk('report_generation')) {
       tools.push(REPORT_TOOL);
-      customContext += `\n\n### SKILL ACTIVA: GENERACIÓN DE INFORMES\n`;
+      active.push('generar informes');
+      customContext += `\n\n### SKILL ACTIVA: GENERACIÓN DE INFORMES`;
       if (user.reportSettings?.prompt) customContext += `\nINSTRUCCIONES ESPECÍFICAS:\n${user.reportSettings.prompt}`;
     } else {
-      customContext += `\n\n### RESTRICCIÓN: GENERACIÓN DE INFORMES DESACTIVADA\nSi el usuario te pide un informe o un SOW NO OFREZCAS AYUDA. Decí que no tenés activada la habilidad de "Generación de Informes" y que debe activarla desde Skills.\n`;
+      customContext += `\n\n### RESTRICCIÓN: GENERACIÓN DE INFORMES DESACTIVADA\nSi el usuario te pide un informe o un SOW NO OFREZCAS AYUDA. Decí que no tenés activada la habilidad de "Generación de Informes" y que debe activarla desde Skills.`;
     }
+
+    if (active.length)   customContext += `\n\n### CAPACIDADES ACTIVAS\n${active.map(a => `- ${a}`).join('\n')}`;
+    if (inactive.length) customContext += `\n\n### CAPACIDADES DESACTIVADAS (no podés usarlas, indicá al usuario que las active desde Skills si las necesita)\n${inactive.map(a => `- ${a}`).join('\n')}`;
 
     const tokens = await getGoogleTokens(user._id);
     let messages: any[] = [...history.slice(-18), { role: 'user', content: message }];

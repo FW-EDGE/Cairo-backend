@@ -65,6 +65,31 @@ router.get('/auth/google', async (_req: Request, res: Response) => {
   }
 });
 
+// GET /auth/google/reauth — re-authorise with updated scopes (no logout)
+router.get('/auth/google/reauth', requireUser, async (req: Request, res: Response) => {
+  const config = getConfig();
+  try {
+    const client = createOAuth2Client();
+    const { url, state } = getAuthUrl(client);
+    await saveOAuthState(state, { flow: 'reauth', user_id: req.user!._id });
+    res.cookie('oauth_state', state, { httpOnly: true, path: '/', maxAge: 600_000 });
+    res.redirect(url);
+  } catch (err) {
+    console.error('[Auth] /auth/google/reauth error:', err);
+    res.redirect(`${config.auth.frontend_url}/dashboard?error=reauth_failed`);
+  }
+});
+
+// GET /auth/scopes — returns which required scopes the user currently has
+router.get('/auth/scopes', requireUser, async (req: Request, res: Response) => {
+  const { SCOPES } = await import('../auth/google.js');
+  const userScopes = new Set(req.user!.google_tokens?.scopes ?? []);
+  // Only check the non-identity scopes (the actual API access ones)
+  const required = SCOPES.filter(s => !s.includes('userinfo') && s !== 'openid');
+  const missing  = required.filter(s => !userScopes.has(s));
+  res.json({ hasAll: missing.length === 0, missing });
+});
+
 // GET /auth/google/connect — connect Google to existing account
 router.get('/auth/google/connect', optionalUser, async (req: Request, res: Response) => {
   const config = getConfig();
@@ -109,7 +134,14 @@ router.get('/auth/google/callback', async (req: Request, res: Response) => {
       storedTokens.expiry = new Date(tokens.expiry_date).toISOString();
     }
 
-    if (meta.flow === 'connect' && meta.user_id) {
+    if (meta.flow === 'reauth' && meta.user_id) {
+      // Just update tokens — session stays intact, no tier/onboarding changes
+      const { updateGoogleTokens } = await import('../db/users.js');
+      await updateGoogleTokens(meta.user_id as string, storedTokens);
+      res.clearCookie('oauth_state', { path: '/' });
+      res.redirect(`${config.auth.frontend_url}/dashboard?reauth=success`);
+
+    } else if (meta.flow === 'connect' && meta.user_id) {
       const user = await connectGoogleUser(
         meta.user_id as string,
         storedTokens,
