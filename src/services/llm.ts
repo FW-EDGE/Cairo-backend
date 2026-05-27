@@ -8,11 +8,16 @@ Cuando buscás y encontrás archivos en Drive, estos automáticamente se resalta
 
 export const CAIRO_CONTEXT_INSTRUCTIONS = `
 INSTRUCCIONES DE CONTEXTO:
-- Se te ha proporcionado información relevante de los archivos de Drive y correos de Gmail del usuario.
+- Se te ha proporcionado información relevante de los archivos de Drive y correos de Gmail del usuario, extraída del índice local.
 - SIEMPRE basá tu respuesta en ese contexto cuando sea relevante para la pregunta.
 - Si el contexto contiene la respuesta, úsala directamente. No inventes ni complementes con información genérica.
 - Cuando cites información del contexto, mencioná la fuente (nombre del archivo o asunto del mail).
 - Si el contexto NO tiene información relevante para la pregunta, decilo claramente.
+
+REGLA CRÍTICA SOBRE HERRAMIENTAS:
+- Si el contexto ya contiene archivos de Drive o correos de Gmail relevantes para lo que pide el usuario, USÁ ESE CONTEXTO DIRECTAMENTE. NO llames a search_drive ni a search_gmail. Esos datos ya fueron buscados antes de esta conversación.
+- Solo usá search_drive o search_gmail si el contexto dice explícitamente "(No se encontraron fragmentos relevantes.)" o si el usuario pide búsqueda en tiempo real ("buscá ahora", "actualizá", "revisá de nuevo").
+- search_drive y search_gmail son costosas y lentas. El contexto indexado es la fuente primaria.
 - PARA INFORMES: Si el usuario pide un informe, asume un tono analítico, detallado y profesional. No escatimes en palabras; la calidad aquí se mide por la profundidad y la extensión del análisis.`;
 
 let openaiClient: OpenAI | null = null;
@@ -36,7 +41,7 @@ export const SEARCH_GMAIL_TOOL = {
   type: 'function',
   function: {
     name: 'search_gmail',
-    description: 'Busca emails en Gmail en tiempo real. Usá la sintaxis de búsqueda de Gmail: "from:nombre", "subject:tema", "after:YYYY/MM/DD", "before:YYYY/MM/DD", "is:unread", "has:attachment", etc. Podés combinar filtros. Usá esta tool cuando el usuario pregunta por emails específicos, de alguien en particular, de cierta fecha, o con cierto tema.',
+    description: 'Busca emails en Gmail EN TIEMPO REAL. IMPORTANTE: si el contexto ya contiene correos relevantes, NO uses esta herramienta — respondé con ese contexto. Usá esta tool SOLO cuando el contexto no tiene la respuesta o el usuario pide buscar algo específico que no está en el contexto. Soporta sintaxis Gmail: "from:nombre", "subject:tema", "after:YYYY/MM/DD", etc.',
     parameters: {
       type: 'object',
       properties: {
@@ -76,7 +81,7 @@ export const SEARCH_DRIVE_TOOL = {
   type: 'function',
   function: {
     name: 'search_drive',
-    description: 'Busca archivos o carpetas en Google Drive. Podés pasar texto simple (ej: "MODO", "SOW NAC") y la búsqueda automáticamente busca en nombre y contenido de archivos. Devuelve hasta 30 resultados ordenados por fecha de modificación.',
+    description: 'Busca archivos en Google Drive EN TIEMPO REAL. IMPORTANTE: si el contexto ya contiene archivos de Drive relevantes, NO uses esta herramienta — respondé con ese contexto directamente. Usá esta tool SOLO cuando el contexto dice "(No se encontraron fragmentos relevantes.)" o cuando el usuario pide explícitamente una búsqueda nueva. Acepta texto simple como "MODO" o "informe enero".',
     parameters: {
       type: 'object',
       properties: {
