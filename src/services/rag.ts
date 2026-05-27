@@ -434,28 +434,83 @@ export function buildSearchQuery(
   return [...userTurns, message].join(' ');
 }
 
+// ── Intent detection ─────────────────────────────────────────────────────────
+
+export interface QueryIntent {
+  wantsMail:     boolean;
+  wantsDrive:    boolean;
+  wantsCalendar: boolean;
+  wantsEverything: boolean;  // no strong signal → show all
+}
+
+/**
+ * Detects the resource type the user is asking about.
+ * Uses keyword signals across message + last user turn for context.
+ */
+export function detectIntent(
+  message: string,
+  history: Array<{ role: string; content: string }> = [],
+): QueryIntent {
+  // Include last user turn for context (e.g. "mostralos" after asking about emails)
+  const lastUser = history.filter(m => m.role === 'user').slice(-1)[0]?.content ?? '';
+  const combined = `${message} ${lastUser}`.toLowerCase();
+
+  const MAIL_SIGNALS = [
+    'mail', 'correo', 'email', 'inbox', 'mensaje', 'mensajes',
+    'escribió', 'escribio', 'mandó', 'mando', 'envió', 'envio',
+    'recibí', 'recibi', 'recibiste', 'te mand', 'me mand',
+    'bandeja', 'asunto', 'adjunto', 'remitente',
+  ];
+  const DRIVE_SIGNALS = [
+    'archivo', 'archivos', 'carpeta', 'carpetas', 'documento', 'documentos',
+    'drive', 'doc', 'sheet', 'hoja', 'pdf', 'presentación', 'presentacion',
+    'slide', 'sow', 'informe', 'reporte',
+  ];
+  const CALENDAR_SIGNALS = [
+    'reunión', 'reunion', 'reuniones', 'evento', 'eventos', 'calendario',
+    'agenda', 'meeting', 'cita', 'citas', 'horario',
+  ];
+
+  const wantsMail     = MAIL_SIGNALS.some(s => combined.includes(s));
+  const wantsDrive    = DRIVE_SIGNALS.some(s => combined.includes(s));
+  const wantsCalendar = CALENDAR_SIGNALS.some(s => combined.includes(s));
+
+  // If multiple signals, trust the strongest. Mail > Drive to avoid false positives.
+  // If only calendar, don't show file/mail highlights at all.
+  const hasAny = wantsMail || wantsDrive || wantsCalendar;
+
+  return {
+    wantsMail,
+    wantsDrive,
+    wantsCalendar,
+    wantsEverything: !hasAny,
+  };
+}
+
 export async function buildContextBlock(
   userId: string,
   message: string,
   tier: string,
   history: Array<{ role: string; content: string }>
-): Promise<{ context: string; items: RagHit[] }> {
+): Promise<{ context: string; items: RagHit[]; intent: QueryIntent }> {
   const msgLower = message.toLowerCase();
 
   // 1. Skip highlighting for very generic commands or with typos
   const reportTerms = ['informe', 'reporte', 'sow', 'ifnrome', 'infmorme', 'report'];
   const actionTerms = ['gener', 'crear', 'hacer', 'hace'];
-  
+
   const hasAction = actionTerms.some(t => msgLower.includes(t));
   const hasReport = reportTerms.some(t => msgLower.includes(t));
-  
+
   const isGenericReportRequest = hasAction && hasReport && !msgLower.includes(' de ') && !msgLower.includes(' sobre ');
 
-  // Intent detection
-  const wantsFolders = msgLower.includes('carpeta');
-  const wantsMails = msgLower.includes('mail') || msgLower.includes('correo');
-  const wantsFiles = (msgLower.includes('archivo') || msgLower.includes('documento')) && !wantsFolders;
-  const wantsEverything = !wantsFolders && !wantsMails && !wantsFiles;
+  const intent = detectIntent(message, history);
+
+  // Legacy aliases for internal filtering
+  const wantsFolders   = msgLower.includes('carpeta');
+  const wantsMails     = intent.wantsMail;
+  const wantsFiles     = intent.wantsDrive && !wantsFolders;
+  const wantsEverything = intent.wantsEverything;
 
   try {
     let allItems: RagHit[] = [];
@@ -463,7 +518,7 @@ export async function buildContextBlock(
 
     // 2. Critical: If it's a broad request, skip highlighting to avoid "random" dots
     if (isGenericReportRequest) {
-      return { context: '', items: [] };
+      return { context: '', items: [], intent };
     }
 
     const searchQuery    = buildSearchQuery(message, history);
@@ -530,16 +585,18 @@ export async function buildContextBlock(
       return {
         context: '(No se encontraron fragmentos relevantes.)',
         items: [],
+        intent,
       };
     }
 
     return {
       context: contextParts.join('\n\n---\n\n'),
       items: filteredItems.slice(0, 30),
+      intent,
     };
   } catch (err) {
     console.error('[RAG] buildContextBlock error:', err);
-    return { context: '', items: [] };
+    return { context: '', items: [], intent: { wantsMail: false, wantsDrive: false, wantsCalendar: false, wantsEverything: true } };
   }
 }
 

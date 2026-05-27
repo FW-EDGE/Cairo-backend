@@ -52,16 +52,25 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
     const sk = (id: string) => (user.skills?.[id] ?? true) === true;
 
     // ── RAG context ───────────────────────────────────────────────────────────
-    const { context: contextBlock, items: ragItemsRaw } = await buildContextBlock(user._id, message, user.tier, history)
+    const { context: contextBlock, items: ragItemsRaw, intent } = await buildContextBlock(user._id, message, user.tier, history)
       .catch((err) => {
         console.error('[Chat] RAG error:', err?.message ?? err);
-        return { context: '', items: [] as any[] };
+        return { context: '', items: [] as any[], intent: { wantsMail: false, wantsDrive: false, wantsCalendar: false, wantsEverything: true } };
       });
 
-    // Filter RAG items based on skills — drive results hidden when drive_search is off
+    // Filter RAG items for the neural map highlight:
+    // 1. Skills gate (drive_search / gmail_search must be on)
+    // 2. Intent gate: only highlight the source type the user is asking about
     const ragItems = ragItemsRaw.filter(item => {
+      // Skills check
       if (item.source === 'drive' && !sk('drive_search')) return false;
       if (item.source === 'gmail' && !sk('gmail_search')) return false;
+
+      // Intent check — only show highlights relevant to what was asked
+      if (!intent.wantsEverything) {
+        if (item.source === 'gmail'  && !intent.wantsMail)  return false;
+        if (item.source === 'drive'  && !intent.wantsDrive) return false;
+      }
       return true;
     });
 
