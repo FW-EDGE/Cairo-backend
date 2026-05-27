@@ -65,14 +65,40 @@ router.get('/auth/google', async (_req: Request, res: Response) => {
   }
 });
 
-// GET /auth/google/reauth-url — returns the Google OAuth URL as JSON (no redirect)
-// The frontend navigates via window.location.href to avoid proxy/mixed-content issues.
+// GET /auth/google/reauth — re-authorise with updated scopes (full redirect, no JS fetch needed)
+router.get('/auth/google/reauth', requireUser, async (req: Request, res: Response) => {
+  const config = getConfig();
+  try {
+    const client = createOAuth2Client();
+    const { url, state } = getAuthUrl(client);
+    await saveOAuthState(state, { flow: 'reauth', user_id: req.user!._id });
+    res.cookie('oauth_state', state, {
+      httpOnly: true,
+      path: '/',
+      maxAge: 600_000,
+      sameSite: IS_PROD ? 'none' : 'lax',
+      secure: IS_PROD,
+    });
+    res.redirect(url);
+  } catch (err) {
+    console.error('[Auth] /auth/google/reauth error:', err);
+    res.redirect(`${config.auth.frontend_url}/dashboard?error=reauth_failed`);
+  }
+});
+
+// GET /auth/google/reauth-url — JSON variant (kept for compatibility)
 router.get('/auth/google/reauth-url', requireUser, async (req: Request, res: Response) => {
   try {
     const client = createOAuth2Client();
     const { url, state } = getAuthUrl(client);
     await saveOAuthState(state, { flow: 'reauth', user_id: req.user!._id });
-    res.cookie('oauth_state', state, { httpOnly: true, path: '/', maxAge: 600_000 });
+    res.cookie('oauth_state', state, {
+      httpOnly: true,
+      path: '/',
+      maxAge: 600_000,
+      sameSite: IS_PROD ? 'none' : 'lax',
+      secure: IS_PROD,
+    });
     res.json({ url });
   } catch (err) {
     console.error('[Auth] /auth/google/reauth-url error:', err);
