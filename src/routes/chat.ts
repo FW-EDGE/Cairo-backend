@@ -181,7 +181,11 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
 
             } else if (call.function.name === 'search_drive') {
               const files = await searchDriveFiles(user._id, tokens, args.query ?? '');
-              toolResult  = files.map((f: any) => `Nombre: ${f.name}, ID: ${f.id}`).join('\n') || 'No se encontraron archivos.';
+              toolResult  = files.map((f: any) => {
+                const modified = f.modifiedTime ? ` (modificado: ${f.modifiedTime.slice(0, 10)})` : '';
+                const type = f.mimeType?.includes('folder') ? '[Carpeta]' : f.mimeType?.includes('document') ? '[Doc]' : f.mimeType?.includes('spreadsheet') ? '[Hoja]' : '[Archivo]';
+                return `${type} ${f.name}${modified} — ID: ${f.id}`;
+              }).join('\n') || 'No se encontraron archivos.';
 
             } else if (call.function.name === 'read_drive_file') {
               toolResult = await getFileContent(user._id, tokens, args.fileId ?? '');

@@ -43,6 +43,15 @@ export async function copyDriveFile(
   return res.data.id!;
 }
 
+/** Escape single quotes for Drive API query strings */
+function driveEscape(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+/**
+ * Accepts either plain text (e.g. "MODO") or raw Drive API query syntax.
+ * Plain text → searches name + fullText so results include file content.
+ */
 export async function searchDriveFiles(
   userId: string,
   tokens: GoogleTokens,
@@ -51,11 +60,30 @@ export async function searchDriveFiles(
   const auth = tokensToClient(tokens, userId);
   const drive = google.drive({ version: 'v3', auth });
 
-  const res = await drive.files.list({
-    q: query,
-    fields: 'files(id, name, mimeType)',
-  });
-  return res.data.files || [];
+  // If query already contains Drive API operators, use as-is; otherwise build one
+  const isDriveQuery = /\b(contains|=|!=|in |trashed|mimeType|parents|owner|sharedWithMe)\b/.test(query);
+  const driveQuery = isDriveQuery
+    ? query
+    : `(name contains '${driveEscape(query)}' or fullText contains '${driveEscape(query)}') and trashed = false`;
+
+  try {
+    const res = await drive.files.list({
+      q: driveQuery,
+      fields: 'files(id, name, mimeType, modifiedTime, size)',
+      pageSize: 30,
+      orderBy: 'modifiedTime desc',
+    });
+    return res.data.files || [];
+  } catch (err: any) {
+    const status = err?.response?.status ?? err?.code;
+    if (status === 401 || status === 403) {
+      throw new Error(
+        'SCOPE_MISSING: El usuario no tiene permisos de Drive. ' +
+        'Debe ir a Skills → "Reconectar cuenta de Google".'
+      );
+    }
+    throw err;
+  }
 }
 
 export async function getFileContent(

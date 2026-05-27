@@ -75,13 +75,13 @@ export const SEARCH_DRIVE_TOOL = {
   type: 'function',
   function: {
     name: 'search_drive',
-    description: 'Busca archivos o carpetas en Google Drive usando una consulta de texto.',
+    description: 'Busca archivos o carpetas en Google Drive. Podés pasar texto simple (ej: "MODO", "SOW NAC") y la búsqueda automáticamente busca en nombre y contenido de archivos. Devuelve hasta 30 resultados ordenados por fecha de modificación.',
     parameters: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
-          description: "La consulta de búsqueda (ej: name contains 'SOW-NAC-')",
+          description: 'Texto a buscar. Puede ser texto simple como "MODO" o "informe enero", o sintaxis avanzada de Drive API.',
         },
       },
       required: ['query'],
