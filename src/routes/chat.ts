@@ -223,8 +223,13 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
               }
             }
           } catch (err: any) {
-            toolResult = `Error al ejecutar la herramienta: ${err.message}`;
-            console.error(`[Chat] Tool ${call.function.name} error:`, err.message);
+            const msg = err.message ?? '';
+            if (msg.includes('SCOPE_MISSING')) {
+              toolResult = msg; // already contains actionable instructions for the LLM
+            } else {
+              toolResult = `Error al ejecutar la herramienta: ${msg}`;
+            }
+            console.error(`[Chat] Tool ${call.function.name} error:`, msg);
           }
         }
 

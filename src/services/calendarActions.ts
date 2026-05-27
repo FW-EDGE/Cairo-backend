@@ -56,7 +56,19 @@ export async function listCalendarEvents(
   };
   if (timeMax) params.timeMax = timeMax;
 
-  const res    = await calendar.events.list(params);
+  let res;
+  try {
+    res = await calendar.events.list(params);
+  } catch (err: any) {
+    const status = err?.response?.status ?? err?.code;
+    if (status === 401 || status === 403) {
+      throw new Error(
+        'SCOPE_MISSING: El usuario no tiene el permiso calendar.events. ' +
+        'Debe ir a Skills → "Reconectar cuenta de Google" para autorizar el acceso al calendario.'
+      );
+    }
+    throw err;
+  }
   const events = res.data.items ?? [];
 
   if (events.length === 0) return 'No hay eventos en el rango indicado.';
@@ -100,11 +112,23 @@ export async function createCalendarEvent(
     body.attendees = params.attendees.map(email => ({ email: email.trim() }));
   }
 
-  const res     = await calendar.events.insert({
-    calendarId:  'primary',
-    requestBody: body,
-    sendUpdates: 'all', // sends calendar invites to all attendees
-  });
+  let res;
+  try {
+    res = await calendar.events.insert({
+      calendarId:  'primary',
+      requestBody: body,
+      sendUpdates: 'all',
+    });
+  } catch (err: any) {
+    const status = err?.response?.status ?? err?.code;
+    if (status === 401 || status === 403) {
+      throw new Error(
+        'SCOPE_MISSING: El usuario no tiene el permiso calendar.events en su cuenta de Google. ' +
+        'Debe ir a Skills → "Reconectar cuenta de Google" para autorizar el acceso al calendario.'
+      );
+    }
+    throw err;
+  }
 
   const ev = res.data;
   return [
