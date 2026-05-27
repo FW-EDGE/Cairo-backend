@@ -69,7 +69,7 @@ export async function searchDriveFiles(
   try {
     const res = await drive.files.list({
       q: driveQuery,
-      fields: 'files(id, name, mimeType, modifiedTime, size)',
+      fields: 'files(id, name, mimeType, modifiedTime, size, webViewLink)',
       pageSize: 30,
       orderBy: 'modifiedTime desc',
     });

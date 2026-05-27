@@ -109,6 +109,8 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
     const tokens = await getGoogleTokens(user._id);
     let messages: any[] = [...history.slice(-18), { role: 'user', content: message }];
     let finalReportData: any = null;
+    // Accumulate Drive files found during tool calls for neural map highlight
+    const driveNodesFound: Array<{ name: string; url?: string; file_type?: string }> = [];
 
     // ── Agentic loop (max 8 tool-call iterations) ─────────────────────────────
     for (let iteration = 0; iteration < 8; iteration++) {
@@ -129,11 +131,16 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
 
       // No tool calls → final answer was already streamed token by token
       if (!toolCallsReceived || toolCallsReceived.calls.length === 0) {
-        if (ragItems.length > 0) {
+        const highlightNodes = driveNodesFound.length > 0
+          ? driveNodesFound
+          : ragItems.length > 0
+            ? ragItems.map(i => ({ name: i.name, url: i.url, file_type: i.type }))
+            : null;
+        if (highlightNodes) {
           broadcastJson({
             type:  'highlight_nodes',
             label: message.slice(0, 60),
-            nodes: ragItems.map(i => ({ name: i.name, url: i.url, file_type: i.type, source: i.source })),
+            nodes: highlightNodes,
           });
         }
         send({ type: 'done', tier: user.tier, reportData: finalReportData });
@@ -181,6 +188,16 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
 
             } else if (call.function.name === 'search_drive') {
               const files = await searchDriveFiles(user._id, tokens, args.query ?? '');
+              // Collect for neural map highlight
+              for (const f of files) {
+                if (f.name) {
+                  const fileType = f.mimeType?.includes('folder') ? 'folder'
+                    : f.mimeType?.includes('document') ? 'doc'
+                    : f.mimeType?.includes('spreadsheet') ? 'sheet'
+                    : 'file';
+                  driveNodesFound.push({ name: f.name, url: f.webViewLink ?? undefined, file_type: fileType });
+                }
+              }
               toolResult  = files.map((f: any) => {
                 const modified = f.modifiedTime ? ` (modificado: ${f.modifiedTime.slice(0, 10)})` : '';
                 const type = f.mimeType?.includes('folder') ? '[Carpeta]' : f.mimeType?.includes('document') ? '[Doc]' : f.mimeType?.includes('spreadsheet') ? '[Hoja]' : '[Archivo]';
