@@ -117,6 +117,16 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
     let messages: any[] = [...history.slice(-18), { role: 'user', content: message }];
     let finalReportData: any = null;
 
+    const broadcastHighlight = () => {
+      if (ragItems.length > 0) {
+        broadcastJson({
+          type:  'highlight_nodes',
+          label: message.slice(0, 60),
+          nodes: ragItems.map(i => ({ name: i.name, url: i.url, file_type: i.type })),
+        });
+      }
+    };
+
     // ── Agentic loop (max 8 tool-call iterations) ─────────────────────────────
     for (let iteration = 0; iteration < 8; iteration++) {
       let assistantContent = '';
@@ -136,13 +146,7 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
 
       // No tool calls → final answer was already streamed token by token
       if (!toolCallsReceived || toolCallsReceived.calls.length === 0) {
-        if (ragItems.length > 0) {
-          broadcastJson({
-            type:  'highlight_nodes',
-            label: message.slice(0, 60),
-            nodes: ragItems.map(i => ({ name: i.name, url: i.url, file_type: i.type })),
-          });
-        }
+        broadcastHighlight();
         send({ type: 'done', tier: user.tier, reportData: finalReportData });
         return;
       }
@@ -247,6 +251,7 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
       // Continue loop — model will stream its response after seeing tool results
     }
 
+    broadcastHighlight();
     send({ type: 'done', tier: user.tier, response: 'CAIRO ha excedido los pasos permitidos para procesar esta solicitud.' });
   } catch (err: any) {
     const errMsg = err?.message ?? String(err);

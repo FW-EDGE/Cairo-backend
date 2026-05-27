@@ -533,12 +533,9 @@ export async function buildContextBlock(
       };
     }
 
-    // 5. Final check: if too many items, don't highlight anything (it's "random" noise)
-    const finalItems = filteredItems.length > 8 ? [] : filteredItems;
-
-    return { 
-      context: contextParts.join('\n\n---\n\n'), 
-      items: finalItems 
+    return {
+      context: contextParts.join('\n\n---\n\n'),
+      items: filteredItems.slice(0, 30),
     };
   } catch (err) {
     console.error('[RAG] buildContextBlock error:', err);
