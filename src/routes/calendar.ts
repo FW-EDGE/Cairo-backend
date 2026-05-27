@@ -54,13 +54,23 @@ router.get('/calendar/week', requireUser, async (req: Request, res: Response) =>
 
     let calPageToken: string | undefined;
     const calendars: Array<{ id: string; summary: string; colorId: string }> = [];
-    do {
-      const calRes = await calendarApi.calendarList.list({ pageToken: calPageToken });
-      for (const cal of calRes.data.items ?? []) {
-        if (cal.id) calendars.push({ id: cal.id, summary: cal.summary ?? '', colorId: cal.colorId ?? '' });
+    try {
+      do {
+        const calRes = await calendarApi.calendarList.list({ pageToken: calPageToken });
+        for (const cal of calRes.data.items ?? []) {
+          if (cal.id) calendars.push({ id: cal.id, summary: cal.summary ?? '', colorId: cal.colorId ?? '' });
+        }
+        calPageToken = calRes.data.nextPageToken ?? undefined;
+      } while (calPageToken);
+    } catch (calListErr: unknown) {
+      const status = (calListErr as { code?: number })?.code;
+      if (status === 401 || status === 403) {
+        console.warn('[Calendar] Insufficient scopes for calendarList.list — user needs to reconnect Google account');
+        res.status(403).json({ error: 'scope_missing', message: 'Se necesitan permisos de Calendar. Reconectá tu cuenta de Google desde Skills.' });
+        return;
       }
-      calPageToken = calRes.data.nextPageToken ?? undefined;
-    } while (calPageToken);
+      throw calListErr;
+    }
 
     type FrontendEvent = {
       datetime: string; date: string; start_time: string; end_time: string;

@@ -10,8 +10,9 @@ export const SCOPES = [
   'https://www.googleapis.com/auth/userinfo.profile',
   'https://www.googleapis.com/auth/drive.readonly',
   'https://www.googleapis.com/auth/gmail.readonly',
-  'https://www.googleapis.com/auth/calendar.events',  // read + create/edit events
-  'https://www.googleapis.com/auth/contacts.readonly', // search contacts by name
+  'https://www.googleapis.com/auth/calendar.readonly',  // read calendar list + events (for /calendar/week)
+  'https://www.googleapis.com/auth/calendar.events',   // create/edit events
+  'https://www.googleapis.com/auth/contacts.readonly',  // search contacts by name
 ];
 
 // Extended scopes — requested only when user enables report generation (incremental auth)
