@@ -65,18 +65,18 @@ router.get('/auth/google', async (_req: Request, res: Response) => {
   }
 });
 
-// GET /auth/google/reauth — re-authorise with updated scopes (no logout)
-router.get('/auth/google/reauth', requireUser, async (req: Request, res: Response) => {
-  const config = getConfig();
+// GET /auth/google/reauth-url — returns the Google OAuth URL as JSON (no redirect)
+// The frontend navigates via window.location.href to avoid proxy/mixed-content issues.
+router.get('/auth/google/reauth-url', requireUser, async (req: Request, res: Response) => {
   try {
     const client = createOAuth2Client();
     const { url, state } = getAuthUrl(client);
     await saveOAuthState(state, { flow: 'reauth', user_id: req.user!._id });
     res.cookie('oauth_state', state, { httpOnly: true, path: '/', maxAge: 600_000 });
-    res.redirect(url);
+    res.json({ url });
   } catch (err) {
-    console.error('[Auth] /auth/google/reauth error:', err);
-    res.redirect(`${config.auth.frontend_url}/dashboard?error=reauth_failed`);
+    console.error('[Auth] /auth/google/reauth-url error:', err);
+    res.status(500).json({ error: 'Failed to generate reauth URL' });
   }
 });
 
