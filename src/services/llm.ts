@@ -107,6 +107,92 @@ export const READ_FILE_TOOL = {
   },
 } as const;
 
+export const SEARCH_CONTACTS_TOOL = {
+  type: 'function',
+  function: {
+    name: 'search_contacts',
+    description: 'Busca la dirección de email de una persona por su nombre. Usá esta herramienta ANTES de crear un evento o enviar un mail cuando no tenés el email exacto del destinatario.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Nombre completo o parcial de la persona (ej: "Ninosca Mogollon")',
+        },
+      },
+      required: ['query'],
+    },
+  },
+} as const;
+
+export const LIST_CALENDAR_EVENTS_TOOL = {
+  type: 'function',
+  function: {
+    name: 'list_calendar_events',
+    description: 'Lista los próximos eventos del calendario del usuario. Útil para ver qué reuniones tiene agendadas o para verificar disponibilidad.',
+    parameters: {
+      type: 'object',
+      properties: {
+        max_results: {
+          type: 'number',
+          description: 'Cantidad máxima de eventos a retornar (default: 10, máximo: 25)',
+        },
+        time_min: {
+          type: 'string',
+          description: 'Fecha de inicio del rango en ISO 8601 (ej: "2026-05-29T00:00:00"). Por defecto: ahora.',
+        },
+        time_max: {
+          type: 'string',
+          description: 'Fecha de fin del rango en ISO 8601 (ej: "2026-06-05T23:59:59"). Opcional.',
+        },
+      },
+    },
+  },
+} as const;
+
+export const CREATE_CALENDAR_EVENT_TOOL = {
+  type: 'function',
+  function: {
+    name: 'create_calendar_event',
+    description: 'Crea un evento en Google Calendar y envía invitaciones automáticas a los participantes. Si no tenés el email de algún invitado, primero usá search_contacts para encontrarlo.',
+    parameters: {
+      type: 'object',
+      properties: {
+        summary: {
+          type: 'string',
+          description: 'Título del evento',
+        },
+        description: {
+          type: 'string',
+          description: 'Descripción u orden del día del evento (opcional)',
+        },
+        location: {
+          type: 'string',
+          description: 'Ubicación o link de videollamada (opcional)',
+        },
+        start: {
+          type: 'string',
+          description: 'Fecha y hora de inicio en ISO 8601, SIN zona horaria (ej: "2026-05-29T16:00:00"). Se asume horario de Buenos Aires.',
+        },
+        end: {
+          type: 'string',
+          description: 'Fecha y hora de fin en ISO 8601 (ej: "2026-05-29T17:00:00"). Si no se especifica, el evento dura 1 hora.',
+        },
+        timezone: {
+          type: 'string',
+          description: 'Zona horaria IANA (default: "America/Argentina/Buenos_Aires")',
+        },
+        attendees: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Lista de emails de los invitados (ej: ["ninosca@empresa.com", "otra@empresa.com"])',
+        },
+      },
+      required: ['summary', 'start'],
+    },
+  },
+} as const;
+
 export const REPORT_TOOL = {
   type: 'function',
   function: {

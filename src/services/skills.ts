@@ -7,6 +7,29 @@ export interface Skill {
 }
 
 export const AVAILABLE_SKILLS: Skill[] = [
+  // ── Conectores Google (activos por defecto) ──────────────────────────────
+  {
+    id: 'gmail_assistant',
+    name: 'Asistente de Gmail',
+    description: 'Permite a CAIRO buscar y leer tus emails en tiempo real para responder preguntas sobre conversaciones, remitentes y adjuntos.',
+    icon: 'Mail',
+    category: 'Productividad',
+  },
+  {
+    id: 'calendar_management',
+    name: 'Calendario y Reuniones',
+    description: 'CAIRO puede consultar tu agenda, crear eventos e invitar participantes directamente desde el chat.',
+    icon: 'Calendar',
+    category: 'Productividad',
+  },
+  {
+    id: 'drive_assistant',
+    name: 'Asistente de Drive',
+    description: 'Permite a CAIRO buscar archivos y leer documentos de Google Drive para responder preguntas sobre su contenido.',
+    icon: 'HardDrive',
+    category: 'Productividad',
+  },
+  // ── Skills avanzadas ─────────────────────────────────────────────────────
   {
     id: 'report_generation',
     name: 'Generación de Informes',

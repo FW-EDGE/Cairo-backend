@@ -5,11 +5,13 @@ import {
   getLlmStreamWithTools, StreamEvent,
   REPORT_TOOL, SEARCH_DRIVE_TOOL, READ_FILE_TOOL,
   SEARCH_GMAIL_TOOL, READ_EMAIL_TOOL,
+  SEARCH_CONTACTS_TOOL, LIST_CALENDAR_EVENTS_TOOL, CREATE_CALENDAR_EVENT_TOOL,
 } from '../services/llm.js';
 import { broadcastJson } from '../websocket.js';
 import { getGoogleTokens, incrementChatUsage, recordTokenUsage, TIER_LIMITS, Tier } from '../db/users.js';
 import { createDriveFolder, copyDriveFile, updateFileContent, searchDriveFiles, getFileContent } from '../services/driveActions.js';
 import { searchGmail, readEmail } from '../services/gmailActions.js';
+import { searchContacts, listCalendarEvents, createCalendarEvent } from '../services/calendarActions.js';
 
 const router = Router();
 
@@ -59,20 +61,44 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
     });
     let customContext = `### FECHA Y HORA ACTUAL\n${nowStr} (hora de Buenos Aires)\n\n${contextBlock}`;
 
-    // ── Tools ─────────────────────────────────────────────────────────────────
-    // Core tools always active: Gmail search/read + Drive search/read.
-    // Report tool: only when the skill is explicitly enabled.
-    const isReportEnabled = user.skills?.['report_generation'] === true;
-    const tools: any[] = [SEARCH_GMAIL_TOOL, READ_EMAIL_TOOL, SEARCH_DRIVE_TOOL, READ_FILE_TOOL];
+    // ── Skills ────────────────────────────────────────────────────────────────
+    // Skills default to true when not explicitly set (new users get everything on).
+    const sk = (id: string) => (user.skills?.[id] ?? true) === true;
+
+    const isGmailEnabled    = sk('gmail_assistant');
+    const isCalendarEnabled = sk('calendar_management');
+    const isDriveEnabled    = sk('drive_assistant');
+    const isReportEnabled   = sk('report_generation');
+
+    const tools: any[] = [];
+
+    if (isGmailEnabled) {
+      tools.push(SEARCH_GMAIL_TOOL, READ_EMAIL_TOOL);
+      customContext += `\n\n### SKILL ACTIVA: ASISTENTE DE GMAIL\nPodés buscar y leer emails del usuario en tiempo real.`;
+    } else {
+      customContext += `\n\n### RESTRICCIÓN: ASISTENTE DE GMAIL DESACTIVADO\nNo podés buscar ni leer emails. Indicá al usuario que lo active desde Skills.`;
+    }
+
+    if (isCalendarEnabled) {
+      tools.push(SEARCH_CONTACTS_TOOL, LIST_CALENDAR_EVENTS_TOOL, CREATE_CALENDAR_EVENT_TOOL);
+      customContext += `\n\n### SKILL ACTIVA: CALENDARIO Y REUNIONES\nPodés consultar la agenda, crear eventos e invitar participantes. Si no tenés el email de alguien, usá search_contacts primero.`;
+    } else {
+      customContext += `\n\n### RESTRICCIÓN: CALENDARIO DESACTIVADO\nNo podés gestionar el calendario. Indicá al usuario que lo active desde Skills.`;
+    }
+
+    if (isDriveEnabled) {
+      tools.push(SEARCH_DRIVE_TOOL, READ_FILE_TOOL);
+      customContext += `\n\n### SKILL ACTIVA: ASISTENTE DE DRIVE\nPodés buscar y leer archivos de Google Drive del usuario.`;
+    } else {
+      customContext += `\n\n### RESTRICCIÓN: ASISTENTE DE DRIVE DESACTIVADO\nNo podés acceder a Drive. Indicá al usuario que lo active desde Skills.`;
+    }
 
     if (isReportEnabled) {
       tools.push(REPORT_TOOL);
-      customContext += `\n\n### SKILL: GENERACIÓN DE INFORMES ACTIVADO\n`;
+      customContext += `\n\n### SKILL ACTIVA: GENERACIÓN DE INFORMES\n`;
       if (user.reportSettings?.prompt) customContext += `\nINSTRUCCIONES ESPECÍFICAS:\n${user.reportSettings.prompt}`;
     } else {
-      customContext += `\n\n### RESTRICCIÓN IMPORTANTE: GENERACIÓN DE INFORMES DESACTIVADA\n`;
-      customContext += `Si el usuario te pide un informe o un SOW NO OFREZCAS AYUDA. `;
-      customContext += `Decí que no tenés activada la habilidad de "Generación de Informes" y que debe activarla desde Skills.\n`;
+      customContext += `\n\n### RESTRICCIÓN: GENERACIÓN DE INFORMES DESACTIVADA\nSi el usuario te pide un informe o un SOW NO OFREZCAS AYUDA. Decí que no tenés activada la habilidad de "Generación de Informes" y que debe activarla desde Skills.\n`;
     }
 
     const tokens = await getGoogleTokens(user._id);
@@ -126,11 +152,14 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
         try { args = JSON.parse(call.function.arguments); } catch { /* use empty */ }
 
         const toolLabels: Record<string, string> = {
-          search_gmail:    '📧 Buscando en Gmail…',
-          read_email:      '📧 Leyendo email…',
-          search_drive:    '📂 Buscando en Drive…',
-          read_drive_file: '📄 Leyendo archivo…',
-          generate_report: '📝 Generando informe…',
+          search_gmail:          '📧 Buscando en Gmail…',
+          read_email:            '📧 Leyendo email…',
+          search_drive:          '📂 Buscando en Drive…',
+          read_drive_file:       '📄 Leyendo archivo…',
+          search_contacts:       '👤 Buscando contacto…',
+          list_calendar_events:  '📅 Consultando calendario…',
+          create_calendar_event: '📅 Creando evento…',
+          generate_report:       '📝 Generando informe…',
         };
         send({ type: 'status', message: toolLabels[call.function.name] ?? 'Procesando…' });
 
@@ -151,6 +180,28 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
 
             } else if (call.function.name === 'read_drive_file') {
               toolResult = await getFileContent(user._id, tokens, args.fileId ?? '');
+
+            } else if (call.function.name === 'search_contacts') {
+              toolResult = await searchContacts(user._id, tokens, args.query ?? '');
+
+            } else if (call.function.name === 'list_calendar_events') {
+              toolResult = await listCalendarEvents(
+                user._id, tokens,
+                args.max_results ?? 10,
+                args.time_min,
+                args.time_max,
+              );
+
+            } else if (call.function.name === 'create_calendar_event') {
+              toolResult = await createCalendarEvent(user._id, tokens, {
+                summary:     args.summary,
+                description: args.description,
+                location:    args.location,
+                start:       args.start,
+                end:         args.end,
+                timezone:    args.timezone,
+                attendees:   args.attendees ?? [],
+              });
 
             } else if (call.function.name === 'generate_report') {
               const { projectName, reportContent } = args;
