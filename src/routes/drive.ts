@@ -33,7 +33,10 @@ export function mimeToType(mime: string): string {
 function flattenForFrontend(nodes: DriveFile[], forceShared = false) {
   const result: Array<{ id: string; name: string; type: string; url: string; modified?: string; parents?: string[]; shared: boolean }> = [];
   function walk(node: DriveFile, isShared: boolean) {
-    result.push({ id: node.id, name: node.name, type: node.type, url: node.webViewLink ?? '', modified: node.modifiedTime, parents: node.parents, shared: forceShared || isShared || node.shared || false });
+    // "shared" in the frontend means "not owned by the user" (came from Shared With Me / Shared Drives).
+    // We intentionally ignore node.shared (Google's "has been shared with others") here —
+    // that flag is true for the user's own files they've shared, which should stay in My Drive.
+    result.push({ id: node.id, name: node.name, type: node.type, url: node.webViewLink ?? '', modified: node.modifiedTime, parents: node.parents, shared: forceShared || isShared });
     for (const child of node.children ?? []) walk(child, forceShared || isShared);
   }
   for (const node of nodes) walk(node, forceShared);
