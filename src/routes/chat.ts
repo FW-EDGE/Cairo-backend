@@ -3,13 +3,13 @@ import { requireUser } from '../auth/middleware.js';
 import { buildContextBlock } from '../services/rag.js';
 import {
   getLlmStreamWithTools, StreamEvent,
-  REPORT_TOOL, SEARCH_DRIVE_TOOL, READ_FILE_TOOL,
+  REPORT_TOOL, READ_FILE_TOOL,
   SEARCH_GMAIL_TOOL, READ_EMAIL_TOOL,
   SEARCH_CONTACTS_TOOL, LIST_CALENDAR_EVENTS_TOOL, CREATE_CALENDAR_EVENT_TOOL,
 } from '../services/llm.js';
 import { broadcastJson } from '../websocket.js';
 import { getGoogleTokens, incrementChatUsage, recordTokenUsage, TIER_LIMITS, Tier } from '../db/users.js';
-import { createDriveFolder, copyDriveFile, updateFileContent, searchDriveFiles, getFileContent } from '../services/driveActions.js';
+import { createDriveFolder, copyDriveFile, updateFileContent, getFileContent } from '../services/driveActions.js';
 import { searchGmail, readEmail } from '../services/gmailActions.js';
 import { searchContacts, listCalendarEvents, createCalendarEvent } from '../services/calendarActions.js';
 
@@ -47,12 +47,23 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
 
     await incrementChatUsage(user._id);
 
+    // ── Skills (granular) ─────────────────────────────────────────────────────
+    // Skills default to true when not explicitly set (new users get everything on).
+    const sk = (id: string) => (user.skills?.[id] ?? true) === true;
+
     // ── RAG context ───────────────────────────────────────────────────────────
-    const { context: contextBlock, items: ragItems } = await buildContextBlock(user._id, message, user.tier, history)
+    const { context: contextBlock, items: ragItemsRaw } = await buildContextBlock(user._id, message, user.tier, history)
       .catch((err) => {
         console.error('[Chat] RAG error:', err?.message ?? err);
         return { context: '', items: [] as any[] };
       });
+
+    // Filter RAG items based on skills — drive results hidden when drive_search is off
+    const ragItems = ragItemsRaw.filter(item => {
+      if (item.source === 'drive' && !sk('drive_search')) return false;
+      if (item.source === 'gmail' && !sk('gmail_search')) return false;
+      return true;
+    });
 
     // ── Current date/time ─────────────────────────────────────────────────────
     const nowStr = new Date().toLocaleString('es-AR', {
@@ -60,10 +71,6 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
       hour: '2-digit', minute: '2-digit', timeZone: 'America/Argentina/Buenos_Aires',
     });
     let customContext = `### FECHA Y HORA ACTUAL\n${nowStr} (hora de Buenos Aires)\n\n${contextBlock}`;
-
-    // ── Skills (granular) ─────────────────────────────────────────────────────
-    // Skills default to true when not explicitly set (new users get everything on).
-    const sk = (id: string) => (user.skills?.[id] ?? true) === true;
 
     const tools: any[] = [];
     const active: string[]   = [];
@@ -87,10 +94,10 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
     else                         inactive.push('crear eventos (calendar_create desactivado)');
 
     // Drive
-    if (sk('drive_search'))    { tools.push(SEARCH_DRIVE_TOOL);          active.push('buscar en Drive'); }
-    else                         inactive.push('buscar en Drive (drive_search desactivado)');
+    if (sk('drive_search'))    { active.push('buscar y listar archivos de Drive (usá el contexto indexado)'); }
+    else                         inactive.push('buscar archivos de Drive (drive_search desactivado)');
 
-    if (sk('drive_read'))      { tools.push(READ_FILE_TOOL);             active.push('leer archivos de Drive'); }
+    if (sk('drive_read'))      { tools.push(READ_FILE_TOOL);             active.push('leer contenido de archivos de Drive'); }
     else                         inactive.push('leer archivos de Drive (drive_read desactivado)');
 
     // Informe
@@ -109,8 +116,6 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
     const tokens = await getGoogleTokens(user._id);
     let messages: any[] = [...history.slice(-18), { role: 'user', content: message }];
     let finalReportData: any = null;
-    // Accumulate Drive files found during tool calls for neural map highlight
-    const driveNodesFound: Array<{ name: string; url?: string; file_type?: string }> = [];
 
     // ── Agentic loop (max 8 tool-call iterations) ─────────────────────────────
     for (let iteration = 0; iteration < 8; iteration++) {
@@ -131,16 +136,11 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
 
       // No tool calls → final answer was already streamed token by token
       if (!toolCallsReceived || toolCallsReceived.calls.length === 0) {
-        const highlightNodes = driveNodesFound.length > 0
-          ? driveNodesFound
-          : ragItems.length > 0
-            ? ragItems.map(i => ({ name: i.name, url: i.url, file_type: i.type }))
-            : null;
-        if (highlightNodes) {
+        if (ragItems.length > 0) {
           broadcastJson({
             type:  'highlight_nodes',
             label: message.slice(0, 60),
-            nodes: highlightNodes,
+            nodes: ragItems.map(i => ({ name: i.name, url: i.url, file_type: i.type })),
           });
         }
         send({ type: 'done', tier: user.tier, reportData: finalReportData });
@@ -185,24 +185,6 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
 
             } else if (call.function.name === 'read_email') {
               toolResult = await readEmail(user._id, tokens, args.message_id ?? '');
-
-            } else if (call.function.name === 'search_drive') {
-              const files = await searchDriveFiles(user._id, tokens, args.query ?? '');
-              // Collect for neural map highlight
-              for (const f of files) {
-                if (f.name) {
-                  const fileType = f.mimeType?.includes('folder') ? 'folder'
-                    : f.mimeType?.includes('document') ? 'doc'
-                    : f.mimeType?.includes('spreadsheet') ? 'sheet'
-                    : 'file';
-                  driveNodesFound.push({ name: f.name, url: f.webViewLink ?? undefined, file_type: fileType });
-                }
-              }
-              toolResult  = files.map((f: any) => {
-                const modified = f.modifiedTime ? ` (modificado: ${f.modifiedTime.slice(0, 10)})` : '';
-                const type = f.mimeType?.includes('folder') ? '[Carpeta]' : f.mimeType?.includes('document') ? '[Doc]' : f.mimeType?.includes('spreadsheet') ? '[Hoja]' : '[Archivo]';
-                return `${type} ${f.name}${modified} — ID: ${f.id}`;
-              }).join('\n') || 'No se encontraron archivos.';
 
             } else if (call.function.name === 'read_drive_file') {
               toolResult = await getFileContent(user._id, tokens, args.fileId ?? '');

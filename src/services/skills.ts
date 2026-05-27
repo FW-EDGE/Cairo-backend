@@ -58,7 +58,7 @@ export const AVAILABLE_SKILLS: Skill[] = [
   {
     id: 'drive_search',
     name: 'Buscar archivos',
-    description: 'CAIRO puede buscar archivos y carpetas en Google Drive por nombre, tipo, contenido o fecha de modificación.',
+    description: 'CAIRO puede buscar y listar archivos de Google Drive en el chat.',
     icon: 'FolderSearch',
     category: 'Productividad',
     group: 'Drive',
