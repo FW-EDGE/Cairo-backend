@@ -17,6 +17,7 @@ INSTRUCCIONES DE CONTEXTO:
 REGLA CRÍTICA SOBRE HERRAMIENTAS:
 - Si el contexto ya contiene archivos de Drive o correos de Gmail relevantes para lo que pide el usuario, USÁ ESE CONTEXTO DIRECTAMENTE. NO llames a search_drive ni a search_gmail. Esos datos ya fueron buscados antes de esta conversación.
 - Solo usá search_drive o search_gmail si el contexto dice explícitamente "(No se encontraron fragmentos relevantes.)" o si el usuario pide búsqueda en tiempo real ("buscá ahora", "actualizá", "revisá de nuevo").
+- EXCEPCIÓN IMPORTANTE — CORREOS SIN LEER: El índice local NO rastrea el estado de lectura (leído/no leído). Si el usuario pregunta cuántos mails sin leer tiene, cuáles son sus mails no leídos, o cualquier consulta sobre estado de lectura, SIEMPRE usá search_gmail con "is:unread" para obtener esa información en tiempo real. No respondas con los correos del contexto como si fueran los no leídos.
 - search_drive y search_gmail son costosas y lentas. El contexto indexado es la fuente primaria.
 - PARA INFORMES: Si el usuario pide un informe, asume un tono analítico, detallado y profesional. No escatimes en palabras; la calidad aquí se mide por la profundidad y la extensión del análisis.`;
 
@@ -41,7 +42,7 @@ export const SEARCH_GMAIL_TOOL = {
   type: 'function',
   function: {
     name: 'search_gmail',
-    description: 'Busca emails en Gmail EN TIEMPO REAL. IMPORTANTE: si el contexto ya contiene correos relevantes, NO uses esta herramienta — respondé con ese contexto. Usá esta tool SOLO cuando el contexto no tiene la respuesta o el usuario pide buscar algo específico que no está en el contexto. Soporta sintaxis Gmail: "from:nombre", "subject:tema", "after:YYYY/MM/DD", etc.',
+    description: 'Busca emails en Gmail EN TIEMPO REAL. IMPORTANTE: si el contexto ya contiene correos relevantes, NO uses esta herramienta — respondé con ese contexto. EXCEPCIÓN: para consultas sobre correos NO LEÍDOS (sin leer, no leídos, unread) SIEMPRE usá esta tool con query "is:unread" porque el índice local no rastrea el estado de lectura. También usala cuando el contexto no tiene la respuesta o el usuario pide buscar algo específico. Soporta sintaxis Gmail: "from:nombre", "subject:tema", "after:YYYY/MM/DD", "is:unread", etc.',
     parameters: {
       type: 'object',
       properties: {

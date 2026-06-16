@@ -322,7 +322,8 @@ async function fetchEmailsByDateRange(
 export async function searchEmbeddings(
   userId: string,
   query: string,
-  maxResults = 12
+  maxResults = 12,
+  sourceFilter?: 'gmail' | 'drive',
 ): Promise<{ context: string; items: RagHit[] }> {
   const config = getConfig();
   const openai = new OpenAI({ apiKey: config.llm.openai.api_key });
@@ -407,7 +408,10 @@ export async function searchEmbeddings(
 
   // Emails use a lower threshold (0.18) since email subjects are short and can score lower
   // than long documents even when highly relevant.
-  const filtered = results.filter((r) => r.score > (r.source === 'gmail' ? 0.18 : 0.25));
+  // Apply source filter when intent is specific (e.g. only Gmail when user asks about mail).
+  const filtered = results
+    .filter((r) => r.score > (r.source === 'gmail' ? 0.18 : 0.25))
+    .filter((r) => !sourceFilter || r.source === sourceFilter);
   if (filtered.length === 0) return { context: '', items: [] };
 
   const lines = filtered.map((r, i) => {
@@ -550,12 +554,22 @@ export async function buildContextBlock(
         }
       }
 
-      // Always run vector search too (covers non-email content and supplements temporal results)
-      const embedResult = await searchEmbeddings(userId, searchQuery).catch((err) => {
+      // Determine source filter based on intent so the LLM context only contains
+      // what the user actually asked about (avoids Drive files appearing on mail queries).
+      const sourceFilter: 'gmail' | 'drive' | undefined =
+        intent.wantsMail && !intent.wantsDrive ? 'gmail' :
+        intent.wantsDrive && !intent.wantsMail ? 'drive' :
+        undefined;
+
+      const embedResult = await searchEmbeddings(userId, searchQuery, 12, sourceFilter).catch((err) => {
         console.warn('[RAG] Vector search failed:', err?.message ?? err);
         return { context: '', items: [] as RagHit[] };
       });
-      const driveResult = await searchDriveCache(userId, searchQuery).catch(() => ({ context: '', items: [] as RagHit[] }));
+
+      // Only hit the drive name-cache when the user is actually asking about Drive files.
+      const driveResult = (intent.wantsDrive || intent.wantsEverything)
+        ? await searchDriveCache(userId, searchQuery).catch(() => ({ context: '', items: [] as RagHit[] }))
+        : { context: '', items: [] as RagHit[] };
 
       contextParts.push(...[embedResult.context, driveResult.context].filter(Boolean));
       allItems.push(...embedResult.items, ...driveResult.items);
