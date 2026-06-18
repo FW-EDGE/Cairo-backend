@@ -59,7 +59,7 @@ app.options("*", cors(corsOptions)); // handle ALL preflight requests first
 app.use(cors(corsOptions));          // attach CORS headers to every response
 
 app.use(cookieParser());
-app.use(express.json());
+app.use(express.json({ limit: '12mb' }));
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.use(authRouter);
