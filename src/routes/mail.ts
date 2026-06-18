@@ -3,6 +3,23 @@ import { google } from 'googleapis';
 import { requireUser } from '../auth/middleware.js';
 import { tokensToClient } from '../auth/google.js';
 
+function isTokenError(err: unknown): boolean {
+  const e = err as any;
+  const errCode = e?.response?.data?.error ?? e?.code ?? '';
+  const status  = e?.response?.status ?? e?.status ?? 0;
+  return (
+    errCode === 'invalid_grant' ||
+    errCode === 'token_expired' ||
+    status === 401 ||
+    String(e?.response?.data?.error_description ?? '').toLowerCase().includes('token')
+  );
+}
+
+function isPrematureClose(err: unknown): boolean {
+  const e = err as any;
+  return e?.code === 'ERR_STREAM_PREMATURE_CLOSE' || e?.error?.code === 'ERR_STREAM_PREMATURE_CLOSE';
+}
+
 interface ParsedMessage {
   id: string; thread_id: string; subject: string;
   sender_name: string; sender_email: string; date: string;
@@ -38,7 +55,13 @@ router.get('/mail', requireUser, async (req: Request, res: Response) => {
     const authClient = tokensToClient(user.google_tokens, user._id);
     const gmailApi = google.gmail({ version: 'v1', auth: authClient });
 
-    const listRes = await gmailApi.users.messages.list({ userId: 'me', maxResults: 500, q: 'in:inbox' });
+    // Limit to 50 recent inbox messages — enough to show the UI, avoids quota exhaustion
+    const thirtyDaysAgo = Math.floor((Date.now() - 30 * 24 * 60 * 60 * 1000) / 1000);
+    const listRes = await gmailApi.users.messages.list({
+      userId: 'me',
+      maxResults: 50,
+      q: `in:inbox after:${thirtyDaysAgo}`,
+    });
     const messageIds = (listRes.data.messages ?? []).map((m) => m.id!).filter(Boolean);
     if (messageIds.length === 0) { res.json({ messages: [], total: 0 }); return; }
 
@@ -64,8 +87,18 @@ router.get('/mail', requireUser, async (req: Request, res: Response) => {
     const messages = results.filter((m): m is ParsedMessage => m !== null);
     res.json({ messages, total: messages.length });
   } catch (err) {
+    if (isPrematureClose(err)) {
+      console.warn('[Mail] Premature close — server warming up, client should retry');
+      res.status(503).json({ error: 'server_warming', message: 'El servidor está iniciando. Reintentá en unos segundos.' });
+      return;
+    }
+    if (isTokenError(err)) {
+      console.warn('[Mail] Token error:', (err as any)?.response?.data ?? err);
+      res.status(401).json({ error: 'token_expired', message: 'Tu sesión de Google expiró. Reconectá tu cuenta desde Settings.' });
+      return;
+    }
     console.error('[Mail] GET /mail error:', err);
-    res.status(500).json({ error: 'Failed to fetch mail' });
+    res.status(500).json({ error: 'Failed to fetch mail', detail: String((err as any)?.message ?? err) });
   }
 });
 

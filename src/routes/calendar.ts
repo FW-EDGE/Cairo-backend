@@ -4,6 +4,23 @@ import { requireUser } from '../auth/middleware.js';
 import { tokensToClient } from '../auth/google.js';
 
 const DAY_NAMES = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+
+function isTokenError(err: unknown): boolean {
+  const e = err as any;
+  const errCode = e?.response?.data?.error ?? e?.code ?? '';
+  const status  = e?.response?.status ?? e?.status ?? 0;
+  return (
+    errCode === 'invalid_grant' ||
+    errCode === 'token_expired' ||
+    status === 401 ||
+    String(e?.response?.data?.error_description ?? '').toLowerCase().includes('token')
+  );
+}
+
+function isPrematureClose(err: unknown): boolean {
+  const e = err as any;
+  return e?.code === 'ERR_STREAM_PREMATURE_CLOSE' || e?.error?.code === 'ERR_STREAM_PREMATURE_CLOSE';
+}
 const router = Router();
 
 function getMondayOfCurrentWeek(): Date {
@@ -63,8 +80,14 @@ router.get('/calendar/week', requireUser, async (req: Request, res: Response) =>
         calPageToken = calRes.data.nextPageToken ?? undefined;
       } while (calPageToken);
     } catch (calListErr: unknown) {
+      if (isPrematureClose(calListErr)) throw calListErr; // re-throw to outer catch → 503
+      if (isTokenError(calListErr)) {
+        console.warn('[Calendar] Token error on calendarList.list:', (calListErr as any)?.response?.data ?? calListErr);
+        res.status(401).json({ error: 'token_expired', message: 'Tu sesión de Google expiró. Reconectá tu cuenta desde Settings.' });
+        return;
+      }
       const status = (calListErr as { code?: number })?.code;
-      if (status === 401 || status === 403) {
+      if (status === 403) {
         console.warn('[Calendar] Insufficient scopes for calendarList.list — user needs to reconnect Google account');
         res.status(403).json({ error: 'scope_missing', message: 'Se necesitan permisos de Calendar. Reconectá tu cuenta de Google desde Skills.' });
         return;
@@ -116,8 +139,18 @@ router.get('/calendar/week', requireUser, async (req: Request, res: Response) =>
     console.log(`[Calendar] user=${user._id} calendars=${calendars.length} events=${allEvents.length}`);
     res.json({ by_day: weekDays, events: allEvents, week_start: formatDateKey(weekStart) });
   } catch (err) {
+    if (isPrematureClose(err)) {
+      console.warn('[Calendar] Premature close — server warming up, client should retry');
+      res.status(503).json({ error: 'server_warming', message: 'El servidor está iniciando. Reintentá en unos segundos.' });
+      return;
+    }
+    if (isTokenError(err)) {
+      console.warn('[Calendar] Token error (outer catch):', (err as any)?.response?.data ?? err);
+      res.status(401).json({ error: 'token_expired', message: 'Tu sesión de Google expiró. Reconectá tu cuenta desde Settings.' });
+      return;
+    }
     console.error('[Calendar] /calendar/week error:', err);
-    res.status(500).json({ error: 'Failed to fetch calendar events' });
+    res.status(500).json({ error: 'Failed to fetch calendar events', detail: String((err as any)?.message ?? err) });
   }
 });
 

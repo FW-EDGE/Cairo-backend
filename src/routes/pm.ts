@@ -7,8 +7,7 @@ import {
   updatePmProject,
   deletePmProject,
 } from '../db/pmProjects.js';
-import { createPmTask, updatePmTask, deletePmTask, getPmTask, getTasksByProject } from '../db/pmTasks.js';
-import { deleteTasksByProject } from '../db/pmTasks.js';
+import { createPmTask, updatePmTask, deletePmTask, getPmTask, getTasksByProject, deleteTasksByProject } from '../db/pmTasks.js';
 import { importTasksFromDoc, suggestAssignments, getGanttData } from '../services/pmService.js';
 
 const router = Router();

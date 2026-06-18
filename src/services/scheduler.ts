@@ -21,9 +21,9 @@ function startKeepAlive(): void {
     } catch (err) {
       console.error('[KeepAlive] ping failed:', err);
     }
-  }, 14 * 60 * 1000); // every 14 minutes
+  }, 10 * 60 * 1000); // every 10 minutes — Render free tier sleeps at 15 min
 
-  console.log('[KeepAlive] started — pinging', url, 'every 14 min');
+  console.log('[KeepAlive] started — pinging', url, 'every 10 min');
 }
 
 /**
