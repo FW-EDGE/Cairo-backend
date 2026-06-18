@@ -28,12 +28,20 @@ export function createOAuth2Client(): OAuth2Client {
     config.auth.google_client_secret,
     config.auth.redirect_uri
   );
-  // Render free tier drops gzip streams mid-transfer causing ERR_STREAM_PREMATURE_CLOSE on
-  // both API calls and OAuth token refresh. Forcing identity encoding removes the Gunzip step.
+  // googleapis-common hardcodes `Accept-Encoding: gzip` on every request (apirequest.js:237).
+  // On Render free tier, gzip streams are dropped mid-transfer → ERR_STREAM_PREMATURE_CLOSE.
+  // A gaxios request interceptor runs AFTER header merging, so it overrides the gzip header
+  // for every call — API requests, token refresh, and all other transporter calls.
   try {
-    const t = (client as any).transporter;
-    if (t) {
-      t.defaults = { ...(t.defaults ?? {}), headers: { 'Accept-Encoding': 'identity' } };
+    const gaxiosInstance = (client as any).gaxios; // AuthClient.gaxios getter → transporter.instance
+    if (gaxiosInstance?.interceptors?.request) {
+      gaxiosInstance.interceptors.request.add({
+        resolved: (reqConfig: Record<string, any>) => {
+          reqConfig.headers ??= {};
+          reqConfig.headers['Accept-Encoding'] = 'identity';
+          return reqConfig;
+        },
+      });
     }
   } catch { /* ignore — transporter shape may vary across google-auth-library versions */ }
   return client;
