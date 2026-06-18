@@ -29,6 +29,8 @@ import vectorMapRouter from "./routes/vectorMap.js";
 import skillsRouter from "./routes/skills.js";
 import adminRouter from "./routes/admin.js";
 import semanticGraphRouter from "./routes/semanticGraph.js";
+import teamRouter from "./routes/team.js";
+import pmRouter from "./routes/pm.js";
 
 // Validate config at startup — log clearly but don't crash so the WS/health endpoints stay up
 let _startupConfigOk = false;
@@ -70,6 +72,8 @@ app.use(embeddingsRouter);
 app.use(vectorMapRouter);
 app.use(skillsRouter);
 app.use(semanticGraphRouter);
+app.use(teamRouter);
+app.use(pmRouter);
 
 // Health check — also reports missing env vars so Render logs show the problem clearly
 app.get("/health", (_req, res) => {
