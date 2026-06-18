@@ -23,11 +23,20 @@ export const REPORT_SCOPES = [
 
 export function createOAuth2Client(): OAuth2Client {
   const config = getConfig();
-  return new OAuth2Client(
+  const client = new OAuth2Client(
     config.auth.google_client_id,
     config.auth.google_client_secret,
     config.auth.redirect_uri
   );
+  // Render free tier drops gzip streams mid-transfer causing ERR_STREAM_PREMATURE_CLOSE on
+  // both API calls and OAuth token refresh. Forcing identity encoding removes the Gunzip step.
+  try {
+    const t = (client as any).transporter;
+    if (t) {
+      t.defaults = { ...(t.defaults ?? {}), headers: { 'Accept-Encoding': 'identity' } };
+    }
+  } catch { /* ignore — transporter shape may vary across google-auth-library versions */ }
+  return client;
 }
 
 export function getAuthUrl(client: OAuth2Client): { url: string; state: string } {

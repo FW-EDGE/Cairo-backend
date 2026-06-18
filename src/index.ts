@@ -13,6 +13,7 @@ import cors from "cors";
 import http from "http";
 import cookieParser from "cookie-parser";
 import { WebSocketServer } from "ws";
+import { google } from "googleapis";
 import { getConfig } from "./config.js";
 import { ensureIndexes } from "./db/oauthStates.js";
 import { startHeartbeatMonitor, cairoState, connectedClients } from "./websocket.js";
@@ -31,6 +32,10 @@ import adminRouter from "./routes/admin.js";
 import semanticGraphRouter from "./routes/semanticGraph.js";
 import teamRouter from "./routes/team.js";
 import pmRouter from "./routes/pm.js";
+
+// Render free tier drops gzip streams mid-transfer (ERR_STREAM_PREMATURE_CLOSE).
+// Setting identity encoding globally prevents googleapis from requesting compressed responses.
+google.options({ headers: { 'Accept-Encoding': 'identity' } });
 
 // Validate config at startup — log clearly but don't crash so the WS/health endpoints stay up
 let _startupConfigOk = false;
