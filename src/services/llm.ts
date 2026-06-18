@@ -28,6 +28,7 @@ function getOpenAI(): OpenAI {
     const config = getConfig();
     openaiClient = new OpenAI({
       apiKey: config.llm.openai.api_key,
+      defaultHeaders: { 'Accept-Encoding': 'identity' },
     });
   }
   return openaiClient;

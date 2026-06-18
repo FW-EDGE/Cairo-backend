@@ -129,7 +129,7 @@ export async function indexDriveForUser(
   maxEmbeddings: number = TIER_LIMITS.business.maxDriveEmbeddings
 ): Promise<number> {
   const config = getConfig();
-  const openai = new OpenAI({ apiKey: config.llm.openai.api_key });
+  const openai = new OpenAI({ apiKey: config.llm.openai.api_key, defaultHeaders: { 'Accept-Encoding': 'identity' } });
   const authClient = tokensToClient(googleTokens, userId);
   const drive = google.drive({ version: 'v3', auth: authClient });
   const col = await embeddingsCol();
@@ -349,7 +349,7 @@ export async function indexGmailForUser(
   maxEmails: number = TIER_LIMITS.business.maxEmails
 ): Promise<number> {
   const config = getConfig();
-  const openai = new OpenAI({ apiKey: config.llm.openai.api_key });
+  const openai = new OpenAI({ apiKey: config.llm.openai.api_key, defaultHeaders: { 'Accept-Encoding': 'identity' } });
   const authClient = tokensToClient(googleTokens, userId);
   const gmail = google.gmail({ version: 'v1', auth: authClient });
   const col = await embeddingsCol();

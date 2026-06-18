@@ -121,7 +121,7 @@ router.post('/team/parse-cv', requireUser, async (req: Request, res: Response) =
     }
 
     const config = getConfig();
-    const openai = new OpenAI({ apiKey: config.llm.openai.api_key });
+    const openai = new OpenAI({ apiKey: config.llm.openai.api_key, defaultHeaders: { 'Accept-Encoding': 'identity' } });
 
     let completion: Awaited<ReturnType<typeof openai.chat.completions.create>>;
     const mime = (file_type ?? '').toLowerCase();

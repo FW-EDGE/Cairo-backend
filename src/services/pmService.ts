@@ -12,7 +12,7 @@ let _client: OpenAI | null = null;
 
 function getClient(): OpenAI {
   if (!_client) {
-    _client = new OpenAI({ apiKey: getConfig().llm.openai.api_key });
+    _client = new OpenAI({ apiKey: getConfig().llm.openai.api_key, defaultHeaders: { 'Accept-Encoding': 'identity' } });
   }
   return _client;
 }

@@ -326,7 +326,7 @@ export async function searchEmbeddings(
   sourceFilter?: 'gmail' | 'drive',
 ): Promise<{ context: string; items: RagHit[] }> {
   const config = getConfig();
-  const openai = new OpenAI({ apiKey: config.llm.openai.api_key });
+  const openai = new OpenAI({ apiKey: config.llm.openai.api_key, defaultHeaders: { 'Accept-Encoding': 'identity' } });
 
   const nameHints = extractNameHints(query);
 
