@@ -28,17 +28,24 @@ export function createOAuth2Client(): OAuth2Client {
     config.auth.google_client_secret,
     config.auth.redirect_uri
   );
-  // googleapis-common hardcodes `Accept-Encoding: gzip` on every request (apirequest.js:237).
-  // On Render free tier, gzip streams are dropped mid-transfer → ERR_STREAM_PREMATURE_CLOSE.
-  // A gaxios request interceptor runs AFTER header merging, so it overrides the gzip header
-  // for every call — API requests, token refresh, and all other transporter calls.
+  // Render free tier drops gzip-compressed HTTP responses → ERR_STREAM_PREMATURE_CLOSE.
+  // Fix: force Accept-Encoding: identity on every outgoing request.
+  //
+  // In gaxios v6, headers is already a Headers instance by the time the interceptor runs,
+  // so bracket assignment (headers['key'] = val) is a no-op. We must use headers.set().
+  // The interceptor also covers token-refresh calls made by the auth client itself.
   try {
-    const gaxiosInstance = (client as any).gaxios; // AuthClient.gaxios getter → transporter.instance
+    const gaxiosInstance = (client as any).gaxios;
     if (gaxiosInstance?.interceptors?.request) {
       gaxiosInstance.interceptors.request.add({
-        resolved: (reqConfig: Record<string, any>) => {
-          reqConfig.headers ??= {};
-          reqConfig.headers['Accept-Encoding'] = 'identity';
+        resolved: (reqConfig: any) => {
+          if (!reqConfig.headers) {
+            reqConfig.headers = { 'Accept-Encoding': 'identity' };
+          } else if (typeof reqConfig.headers.set === 'function') {
+            reqConfig.headers.set('Accept-Encoding', 'identity');
+          } else {
+            reqConfig.headers['Accept-Encoding'] = 'identity';
+          }
           return reqConfig;
         },
       });

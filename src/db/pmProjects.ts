@@ -12,6 +12,7 @@ export interface PmProject {
   status: ProjectStatus;
   start_date: string;
   end_date: string;
+  assignee_ids: string[];   // team members assigned to this project
   created_at: string;
 }
 
@@ -47,7 +48,7 @@ export async function getPmProject(id: string, ownerId: string): Promise<PmProje
 
 export async function createPmProject(
   ownerId: string,
-  data: { name: string; drive_doc_id?: string | null; drive_doc_name?: string | null; status?: ProjectStatus; start_date: string; end_date: string }
+  data: { name: string; drive_doc_id?: string | null; drive_doc_name?: string | null; status?: ProjectStatus; start_date: string; end_date: string; assignee_ids?: string[] }
 ): Promise<PmProject> {
   const col = await pmProjectsCol();
   const doc = {
@@ -58,6 +59,7 @@ export async function createPmProject(
     status: data.status ?? 'planning',
     start_date: data.start_date,
     end_date: data.end_date,
+    assignee_ids: data.assignee_ids ?? [],
     created_at: new Date().toISOString(),
   };
   const result = await col.insertOne(doc);
@@ -67,7 +69,7 @@ export async function createPmProject(
 export async function updatePmProject(
   id: string,
   ownerId: string,
-  data: Partial<{ name: string; drive_doc_id: string | null; drive_doc_name: string | null; status: ProjectStatus; start_date: string; end_date: string }>
+  data: Partial<{ name: string; drive_doc_id: string | null; drive_doc_name: string | null; status: ProjectStatus; start_date: string; end_date: string; assignee_ids: string[] }>
 ): Promise<PmProject | null> {
   const col = await pmProjectsCol();
   const result = await col.findOneAndUpdate(

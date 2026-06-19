@@ -34,6 +34,7 @@ router.post('/pm/projects', requireUser, async (req: Request, res: Response) => 
       return;
     }
 
+    const { assignee_ids } = req.body;
     const project = await createPmProject(user._id, {
       name,
       drive_doc_id: drive_doc_id ?? null,
@@ -41,6 +42,7 @@ router.post('/pm/projects', requireUser, async (req: Request, res: Response) => 
       status,
       start_date,
       end_date,
+      assignee_ids: Array.isArray(assignee_ids) ? assignee_ids : [],
     });
 
     res.status(201).json({ project });
@@ -53,10 +55,11 @@ router.post('/pm/projects', requireUser, async (req: Request, res: Response) => 
 router.put('/pm/projects/:id', requireUser, async (req: Request, res: Response) => {
   try {
     const user = req.user!;
-    const { name, drive_doc_id, drive_doc_name, status, start_date, end_date } = req.body;
+    const { name, drive_doc_id, drive_doc_name, status, start_date, end_date, assignee_ids } = req.body;
 
     const updated = await updatePmProject(req.params.id, user._id, {
       name, drive_doc_id, drive_doc_name, status, start_date, end_date,
+      ...(Array.isArray(assignee_ids) ? { assignee_ids } : {}),
     });
 
     if (!updated) { res.status(404).json({ error: 'Proyecto no encontrado' }); return; }
@@ -123,6 +126,21 @@ router.post('/pm/projects/:id/assign', requireUser, async (req: Request, res: Re
 });
 
 // ─── Gantt data ───────────────────────────────────────────────────────────────
+
+// GET /pm/gantt/all — all projects + all their tasks + team members in one shot
+router.get('/pm/gantt/all', requireUser, async (req: Request, res: Response) => {
+  try {
+    const user = req.user!;
+    const projects = await getPmProjects(user._id);
+    const allData = await Promise.all(projects.map(p => getGanttData(p, user._id)));
+    const members = allData[0]?.members ?? [];  // same team for all projects
+    const projectsWithTasks = allData.map((d, i) => ({ ...projects[i], tasks: d.tasks }));
+    res.json({ projects: projectsWithTasks, members });
+  } catch (err) {
+    console.error('[PM] GET /pm/gantt/all error:', err);
+    res.status(500).json({ error: 'Error al obtener datos del Gantt' });
+  }
+});
 
 router.get('/pm/projects/:id/gantt', requireUser, async (req: Request, res: Response) => {
   try {
