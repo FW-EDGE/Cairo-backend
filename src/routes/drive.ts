@@ -142,6 +142,72 @@ router.get('/drive/cached', requireUser, async (req: Request, res: Response) => 
   }
 });
 
+// GET /drive/search?q=nombre
+// Fast path: cache. Fallback: live Drive API (when cache is empty).
+router.get('/drive/search', requireUser, async (req: Request, res: Response) => {
+  try {
+    const user = req.user!;
+    const q    = ((req.query.q as string) ?? '').trim();
+
+    // ── 1. Try cache ────────────────────────────────────────────────
+    const cached = await getDriveCache(user._id);
+    if (cached) {
+      function walkAll(nodes: DriveFile[], acc: DriveFile[] = []): DriveFile[] {
+        for (const n of nodes) { acc.push(n); if (n.children?.length) walkAll(n.children, acc); }
+        return acc;
+      }
+      const all        = walkAll([...cached.mydrive, ...cached.shared]);
+      const nonFolders = all.filter(f => f.type !== 'folder');
+      const qLow       = q.toLowerCase();
+      const matched    = q ? nonFolders.filter(f => f.name.toLowerCase().includes(qLow)) : nonFolders;
+
+      if (nonFolders.length > 0) {
+        console.log(`[Drive] search cache: total=${nonFolders.length} matched=${matched.length}`);
+        res.json({
+          files: matched.slice(0, 80).map(f => ({ id: f.id, name: f.name, type: f.type, url: f.webViewLink ?? '', shared: f.shared ?? false })),
+          total: nonFolders.length,
+          source: 'cache',
+        });
+        return;
+      }
+      console.log('[Drive] cache exists but empty — falling back to live API');
+    }
+
+    // ── 2. Live Drive API fallback ──────────────────────────────────
+    if (!user.google_tokens) {
+      res.json({ files: [], total: 0, source: 'no_auth' });
+      return;
+    }
+
+    const authClient = tokensToClient(user.google_tokens, user._id);
+    const driveApi   = google.drive({ version: 'v3', auth: authClient });
+
+    // Escape single quotes in the query (Drive API requirement)
+    const safe      = q.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const driveQ    = q
+      ? `name contains '${safe}' and trashed=false and mimeType != 'application/vnd.google-apps.folder'`
+      : `trashed=false and mimeType != 'application/vnd.google-apps.folder'`;
+
+    const result = await driveApi.files.list({
+      q: driveQ,
+      fields: 'files(id,name,mimeType,webViewLink,shared)',
+      pageSize: 50,
+      corpora: 'user',
+    });
+
+    const files = (result.data.files ?? [])
+      .map(f => ({ id: f.id ?? '', name: f.name ?? '', type: mimeToType(f.mimeType ?? ''), url: f.webViewLink ?? '', shared: f.shared ?? false }))
+      .filter(f => f.type !== 'folder');
+
+    console.log(`[Drive] search live API: q="${q}" → ${files.length} files`);
+    res.json({ files, total: files.length, source: 'live' });
+
+  } catch (err) {
+    console.error('[Drive] GET /drive/search error:', err);
+    res.status(500).json({ error: 'Error buscando archivos en Drive' });
+  }
+});
+
 // POST /drive/refresh
 router.post('/drive/refresh', requireUser, async (req: Request, res: Response) => {
   const user = req.user!;
