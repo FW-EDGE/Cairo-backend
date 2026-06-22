@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { Router, Request, Response } from 'express';
 import {
   createOAuth2Client,
@@ -335,6 +336,142 @@ router.post('/auth/dev/set-tier', requireUser, async (req: Request, res: Respons
   } catch (err) {
     console.error('[Auth] set-tier error:', err);
     res.status(500).json({ error: 'Failed to set tier' });
+  }
+});
+
+// ── Tactiq OAuth 2.0 + PKCE ───────────────────────────────────────────────────
+
+import {
+  buildAuthorizationUrl,
+  generateCodeVerifier,
+  generateCodeChallenge,
+  exchangeCodeForTokens,
+  clearTactiqCache,
+} from '../services/tactiqClient.js';
+import { saveTactiqTokens, getTactiqTokens, clearTactiqTokens } from '../db/users.js';
+
+// GET /auth/tactiq — start OAuth flow (requires user to be logged in)
+router.get('/auth/tactiq', requireUser, async (req: Request, res: Response) => {
+  try {
+    const config      = getConfig();
+    const redirectUri = (config as any).TACTIQ_REDIRECT_URI ?? process.env.TACTIQ_REDIRECT_URI ?? '';
+    if (!redirectUri) { res.status(500).json({ error: 'TACTIQ_REDIRECT_URI no configurado' }); return; }
+
+    const verifier   = generateCodeVerifier();
+    const challenge  = generateCodeChallenge(verifier);
+    const state      = crypto.randomBytes(16).toString('hex');
+
+    // Store state + verifier + user_id in oauthStates (TTL 10 min)
+    await saveOAuthState(state, { flow: 'tactiq', user_id: req.user!._id, verifier });
+    res.cookie('tactiq_state', state, {
+      httpOnly: true, path: '/', maxAge: 600_000,
+      sameSite: IS_PROD ? 'none' : 'lax', secure: IS_PROD,
+    });
+
+    const authUrl = buildAuthorizationUrl(redirectUri, state, challenge);
+    res.redirect(authUrl);
+  } catch (err) {
+    console.error('[Auth] /auth/tactiq error:', err);
+    res.status(500).json({ error: 'Failed to start Tactiq OAuth' });
+  }
+});
+
+// GET /auth/tactiq/callback
+router.get('/auth/tactiq/callback', async (req: Request, res: Response) => {
+  const config = getConfig();
+  const frontendUrl = config.auth.frontend_url;
+  const { code, state: queryState, error: oauthError } = req.query as Record<string, string>;
+
+  if (oauthError) { res.redirect(`${frontendUrl}/dashboard?tactiq_error=${oauthError}`); return; }
+  if (!code || !queryState) { res.redirect(`${frontendUrl}/dashboard?tactiq_error=missing_params`); return; }
+
+  const cookieState = req.cookies?.['tactiq_state'];
+  if (!cookieState || cookieState !== queryState) {
+    res.redirect(`${frontendUrl}/dashboard?tactiq_error=state_mismatch`);
+    return;
+  }
+
+  const meta = await popOAuthState(queryState);
+  if (!meta || meta.flow !== 'tactiq' || !meta.user_id || !meta.verifier) {
+    res.redirect(`${frontendUrl}/dashboard?tactiq_error=invalid_state`);
+    return;
+  }
+
+  try {
+    const redirectUri = (config as any).TACTIQ_REDIRECT_URI ?? process.env.TACTIQ_REDIRECT_URI ?? '';
+    const tokens = await exchangeCodeForTokens(code, redirectUri, meta.verifier as string);
+    await saveTactiqTokens(meta.user_id as string, tokens);
+    clearTactiqCache(meta.user_id as string);
+    res.clearCookie('tactiq_state', { path: '/' });
+
+    // Auto-seed Tactiq skill + agent after successful connect
+    try {
+      const { orchSkillsCol, orchToolsCol, orchAgentsCol } = await import('../db/orchestration.js');
+      const { ObjectId: OID } = await import('mongodb');
+      const userId = new OID(meta.user_id as string);
+      const sCol = await orchSkillsCol(); const tCol = await orchToolsCol(); const aCol = await orchAgentsCol();
+      const now = new Date();
+      let skillDoc = await sCol.findOne({ user_id: userId, skill_id: 'tactiq_mcp' });
+      if (!skillDoc) {
+        const r = await sCol.insertOne({
+          user_id: userId, label: 'Tactiq MCP', skill_id: 'tactiq_mcp',
+          description: 'Acceso a transcripciones de reuniones vía Tactiq.',
+          prompt: '', provider: 'Tactiq', auth_type: 'Bearer Token', skill_type: 'MCP Tool',
+          endpoint: 'https://mcp.tactiq.io', rate_limit: '',
+          tool_ids: [], color: '#818cf8', notes: '',
+          is_enabled: true, is_builtin: true, created_at: now, updated_at: now,
+        });
+        skillDoc = await sCol.findOne({ _id: r.insertedId });
+      }
+      const skillId = skillDoc!._id!.toString();
+      const toolDefs = [
+        { tool_id: 'tactiq_search_tool',     fn: 'tactiq_search_meeting_transcripts', label: 'tactiq.search',     description: 'Buscar transcripciones en Tactiq.', inputs: [{ name: 'query', type: 'string', required: true, desc: 'Búsqueda en lenguaje natural' }], output: 'Fragmentos relevantes.' },
+        { tool_id: 'tactiq_transcript_tool', fn: 'tactiq_get_meeting_transcript',     label: 'tactiq.transcript', description: 'Obtener transcripción completa.',     inputs: [{ name: 'meeting_id', type: 'string', required: true, desc: 'ID de la reunión' }],             output: 'Transcripción completa.' },
+        { tool_id: 'tactiq_list_tool',       fn: 'tactiq_get_recent_meetings',        label: 'tactiq.list',       description: 'Listar reuniones recientes.',         inputs: [{ name: 'limit', type: 'number', desc: 'Cantidad (default 10)' }],                           output: '{ id, title, date }[]' },
+      ];
+      const toolIds: string[] = [];
+      for (const def of toolDefs) {
+        const ex = await tCol.findOne({ user_id: userId, tool_id: def.tool_id });
+        if (ex) { toolIds.push(ex._id!.toString()); continue; }
+        const r = await tCol.insertOne({ user_id: userId, ...def, category: 'Tactiq', skill_id: skillId, color: '#818cf8', endpoint: '', auth_type: 'none', rate_limit: '', timeout_ms: '30000', notes: '', is_builtin: true, created_at: now, updated_at: now });
+        toolIds.push(r.insertedId.toString());
+      }
+      await sCol.updateOne({ _id: skillDoc!._id }, { $set: { tool_ids: toolIds } });
+      const exAgent = await aCol.findOne({ user_id: userId, agent_id: 'agent-tactiq' });
+      if (!exAgent) {
+        await aCol.insertOne({ user_id: userId, label: 'Meeting Agent', agent_id: 'agent-tactiq', description: 'Especialista en reuniones vía Tactiq.', system_prompt: 'Sos un agente especializado en reuniones vía Tactiq. Podés buscar transcripciones, obtener el contenido completo de una reunión y resumir lo hablado. Respondé siempre en el idioma del usuario.', skill_ids: [skillId], process_ids: [], model: 'gpt-4o', color: '#818cf8', is_enabled: true, is_builtin: true, created_at: now, updated_at: now } as any);
+      }
+    } catch (seedErr) {
+      console.warn('[Auth] Tactiq auto-seed failed (non-fatal):', seedErr);
+    }
+
+    res.redirect(`${frontendUrl}/dashboard?tactiq_connected=1`);
+  } catch (err) {
+    console.error('[Auth] /auth/tactiq/callback error:', err);
+    res.clearCookie('tactiq_state', { path: '/' });
+    res.redirect(`${frontendUrl}/dashboard?tactiq_error=callback_failed`);
+  }
+});
+
+// GET /auth/tactiq/status
+router.get('/auth/tactiq/status', requireUser, async (req: Request, res: Response) => {
+  try {
+    const tokens = await getTactiqTokens(req.user!._id);
+    res.json({ connected: !!tokens });
+  } catch (err) {
+    res.json({ connected: false });
+  }
+});
+
+// POST /auth/tactiq/disconnect
+router.post('/auth/tactiq/disconnect', requireUser, async (req: Request, res: Response) => {
+  try {
+    await clearTactiqTokens(req.user!._id);
+    clearTactiqCache(req.user!._id);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Auth] /auth/tactiq/disconnect error:', err);
+    res.status(500).json({ error: 'Failed to disconnect Tactiq' });
   }
 });
 

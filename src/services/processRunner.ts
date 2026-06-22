@@ -9,6 +9,7 @@ import { searchGmail, readEmail } from './gmailActions.js';
 import { getFileContent } from './driveActions.js';
 import { searchContacts, listCalendarEvents, createCalendarEvent } from './calendarActions.js';
 import { buildContextBlock } from './rag.js';
+import { callTactiqTool, isTactiqTool, getTactiqOpenAIToolDefs, getTactiqToolLabel } from './tactiqClient.js';
 
 // ── Tool registry ─────────────────────────────────────────────────────────────
 
@@ -58,6 +59,7 @@ const TOOL_LABELS: Record<string, string> = {
   create_calendar_event: '📅 Creando evento en calendario…',
 };
 
+
 async function dispatchHttpTool(tool: OrchTool, args: any): Promise<string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (tool.auth_type === 'api_key' && tool.notes) {
@@ -85,6 +87,12 @@ async function dispatchTool(
   tokens: any,
 ): Promise<string> {
   try {
+    // Tactiq MCP tools — prefix: tactiq_
+    if (isTactiqTool(fn)) {
+      const toolName = fn.replace(/^tactiq_/, '');
+      return await callTactiqTool(userId, toolName, args);
+    }
+
     if (BUILTIN_GOOGLE_FNS.has(fn)) {
       if (!tokens) return 'Error: No hay tokens de Google disponibles. Reconectá tu cuenta.';
       switch (fn) {
@@ -156,6 +164,12 @@ const STATIC_AGENTS: Record<string, Omit<AgentConfig, 'id'>> = {
     label:        'Calendar Agent',
     systemPrompt: 'Sos un agente especializado en Google Calendar y Contactos. Tu trabajo es consultar la agenda, crear eventos, buscar disponibilidad y gestionar contactos. Siempre confirmá los detalles antes de crear eventos. Respondé siempre en el idioma del usuario.',
     toolFns:      ['list_calendar_events', 'create_calendar_event', 'search_contacts'],
+    model:        'gpt-4o',
+  },
+  'agent-tactiq': {
+    label:        'Meeting Agent',
+    systemPrompt: 'Sos un agente especializado en reuniones vía Tactiq. Podés buscar transcripciones, obtener el contenido completo de una reunión y resumir lo hablado. Respondé siempre en el idioma del usuario.',
+    toolFns:      ['tactiq_search_meeting_transcripts', 'tactiq_get_meeting_transcript', 'tactiq_list_meetings'],
     model:        'gpt-4o',
   },
   // Legacy fallback — kept so old processes referencing agent-cairo don't break
@@ -251,9 +265,19 @@ async function* runAgentStep(
   ragContext?:         string,
   processInstructions?: string,
 ): AsyncGenerator<AgentStepEvent> {
-  const openai    = getOpenAI();
-  const model     = resolveOAIModel(agent.model);
-  const toolDefs  = await loadUserToolDefs(agent.toolFns, userId);
+  const openai   = getOpenAI();
+  const model    = resolveOAIModel(agent.model);
+
+  const regularFns = agent.toolFns.filter(fn => !isTactiqTool(fn));
+  const tactiqFns  = agent.toolFns.filter(fn => isTactiqTool(fn));
+
+  const [regularDefs, tactiqDefs] = await Promise.all([
+    loadUserToolDefs(regularFns, userId),
+    tactiqFns.length > 0
+      ? getTactiqOpenAIToolDefs(userId).catch(() => [] as any[])
+      : Promise.resolve([] as any[]),
+  ]);
+  const toolDefs = [...regularDefs, ...tactiqDefs];
 
   const nowStr = new Date().toLocaleString('es-AR', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
@@ -331,7 +355,7 @@ async function* runAgentStep(
       yield {
         type:  'tool_call',
         tool:  call.name,
-        label: TOOL_LABELS[call.name] ?? `⚙️ ${call.name}…`,
+        label: TOOL_LABELS[call.name] ?? (isTactiqTool(call.name) ? getTactiqToolLabel(call.name) : `⚙️ ${call.name}…`),
         args,
       };
 

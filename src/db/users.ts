@@ -20,6 +20,13 @@ export interface GoogleTokens {
   scopes: string[];
 }
 
+export interface TactiqTokens {
+  access_token:  string;
+  refresh_token?: string;
+  expiry?:       string; // ISO string
+  scopes:        string[];
+}
+
 export interface ChatUsage {
   chat_messages: number;
   period_start: string; // ISO — start of current 30-day period
@@ -38,7 +45,8 @@ export interface AppUser {
   name: string;
   picture: string;
   password_hash?: string;
-  google_tokens?: GoogleTokens;
+  google_tokens?:  GoogleTokens;
+  tactiq_tokens?:  TactiqTokens;
   tier: 'free' | 'pro' | 'business' | 'admin';
   usage?: ChatUsage;
   token_usage?: TokenUsage;
@@ -296,6 +304,28 @@ export async function connectGoogleUser(
 
   if (!result) throw new Error('User not found');
   return serialize(result) as AppUser;
+}
+
+export async function saveTactiqTokens(userId: string, tokens: TactiqTokens): Promise<void> {
+  const col = await usersCol();
+  await col.updateOne(
+    { _id: new ObjectId(userId) },
+    { $set: { tactiq_tokens: tokens, 'integrations.tactiq': { connected: true, last_sync: new Date().toISOString() } } }
+  );
+}
+
+export async function getTactiqTokens(userId: string): Promise<TactiqTokens | null> {
+  const col = await usersCol();
+  const user = await col.findOne({ _id: new ObjectId(userId) }, { projection: { tactiq_tokens: 1 } });
+  return user?.tactiq_tokens ?? null;
+}
+
+export async function clearTactiqTokens(userId: string): Promise<void> {
+  const col = await usersCol();
+  await col.updateOne(
+    { _id: new ObjectId(userId) },
+    { $unset: { tactiq_tokens: '' }, $set: { 'integrations.tactiq': { connected: false } } }
+  );
 }
 
 export async function toggleSkill(userId: string, skillId: string, enabled: boolean): Promise<void> {

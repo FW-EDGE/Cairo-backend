@@ -323,5 +323,69 @@ export async function seedBuiltins(userId: ObjectId): Promise<void> {
 
   await agentsCol.insertMany(agentDocs);
 
+  // ── 6. Tactiq skill + tool stubs + Meeting Agent ──────────────────────────
+  const tactiqSkillDoc: OrchSkill = {
+    user_id: userId, label: 'Tactiq MCP', skill_id: 'tactiq_mcp',
+    description: 'Acceso a transcripciones de reuniones vía el MCP de Tactiq. Requiere TACTIQ_API_TOKEN en el entorno.',
+    prompt: '', provider: 'Tactiq', auth_type: 'Bearer Token', skill_type: 'MCP Tool',
+    endpoint: 'https://mcp.tactiq.io', rate_limit: '',
+    tool_ids: [], color: '#818cf8', notes: 'Token: obtenelo en https://tactiq.io/settings → MCP Integration',
+    is_enabled: true, is_builtin: true, created_at: now, updated_at: now,
+  };
+  const tactiqSkillId = await skillsCol.insertOne(tactiqSkillDoc).then(r => r.insertedId);
+
+  const tactiqToolDocs: OrchTool[] = [
+    {
+      user_id: userId, label: 'tactiq.search', tool_id: 'tactiq_search_tool',
+      fn: 'tactiq_search_meeting_transcripts',
+      description: 'Buscar en las transcripciones de reuniones de Tactiq usando lenguaje natural.',
+      category: 'Tactiq', skill_id: tactiqSkillId.toString(), color: '#818cf8',
+      inputs: [
+        { name: 'query', type: 'string', required: true, desc: 'Pregunta o términos de búsqueda en lenguaje natural' },
+      ],
+      output: 'Lista de fragmentos de transcripciones con nombre de reunión, fecha y texto relevante.',
+      endpoint: '', auth_type: 'none', rate_limit: '', timeout_ms: '30000', notes: '',
+      is_builtin: true, created_at: now, updated_at: now,
+    },
+    {
+      user_id: userId, label: 'tactiq.transcript', tool_id: 'tactiq_transcript_tool',
+      fn: 'tactiq_get_meeting_transcript',
+      description: 'Obtener la transcripción completa de una reunión específica por ID.',
+      category: 'Tactiq', skill_id: tactiqSkillId.toString(), color: '#818cf8',
+      inputs: [
+        { name: 'meeting_id', type: 'string', required: true, desc: 'ID de la reunión (de una búsqueda previa)' },
+      ],
+      output: 'Transcripción completa de la reunión con timestamps y participantes.',
+      endpoint: '', auth_type: 'none', rate_limit: '', timeout_ms: '30000', notes: '',
+      is_builtin: true, created_at: now, updated_at: now,
+    },
+    {
+      user_id: userId, label: 'tactiq.list', tool_id: 'tactiq_list_tool',
+      fn: 'tactiq_get_recent_meetings',
+      description: 'Listar las reuniones más recientes capturadas en Tactiq.',
+      category: 'Tactiq', skill_id: tactiqSkillId.toString(), color: '#818cf8',
+      inputs: [
+        { name: 'limit', type: 'number', desc: 'Cantidad máxima de reuniones a retornar (default 10)' },
+      ],
+      output: '{ id, title, date, participants, platform }[]',
+      endpoint: '', auth_type: 'none', rate_limit: '', timeout_ms: '30000', notes: '',
+      is_builtin: true, created_at: now, updated_at: now,
+    },
+  ];
+
+  const tactiqToolIds = await Promise.all(
+    tactiqToolDocs.map(t => toolsCol.insertOne(t).then(r => r.insertedId.toString())),
+  );
+  await skillsCol.updateOne({ _id: tactiqSkillId }, { $set: { tool_ids: tactiqToolIds } });
+
+  await agentsCol.insertOne({
+    user_id: userId, label: 'Meeting Agent', agent_id: 'agent-tactiq',
+    description: 'Especialista en reuniones vía Tactiq. Busca y resume transcripciones de Google Meet, Zoom y Teams.',
+    system_prompt: 'Sos un agente especializado en reuniones vía Tactiq. Podés buscar transcripciones, obtener el contenido completo de una reunión y resumir lo hablado. Respondé siempre en el idioma del usuario.',
+    skill_ids: [tactiqSkillId.toString()],
+    process_ids: [], model: 'gpt-4o', color: '#818cf8',
+    is_enabled: true, is_builtin: true, created_at: now, updated_at: now,
+  } as OrchAgent);
+
   console.log(`[seedBuiltins] Built-in nodes seeded for user ${userId}`);
 }

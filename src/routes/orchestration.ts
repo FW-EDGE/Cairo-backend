@@ -449,6 +449,92 @@ router.post('/orchestration/reseed-agents', requireUser, async (req: Request, re
   }
 });
 
+// ── POST /orchestration/reseed-tactiq ────────────────────────────────────────
+// Upserts the Tactiq skill + tool stubs + Meeting Agent for the current user.
+router.post('/orchestration/reseed-tactiq', requireUser, async (req: Request, res: Response) => {
+  try {
+    const userId    = new ObjectId(req.user!._id.toString());
+    const skillsCol = await orchSkillsCol();
+    const toolsCol  = await orchToolsCol();
+    const agentsCol = await orchAgentsCol();
+    const now       = new Date();
+
+    // Upsert Tactiq skill
+    let tactiqSkill = await skillsCol.findOne({ user_id: userId, skill_id: 'tactiq_mcp' });
+    if (!tactiqSkill) {
+      const result = await skillsCol.insertOne({
+        user_id: userId, label: 'Tactiq MCP', skill_id: 'tactiq_mcp',
+        description: 'Acceso a transcripciones de reuniones vía el MCP de Tactiq. Requiere TACTIQ_API_TOKEN en el entorno.',
+        prompt: '', provider: 'Tactiq', auth_type: 'Bearer Token', skill_type: 'MCP Tool',
+        endpoint: 'https://mcp.tactiq.io', rate_limit: '',
+        tool_ids: [], color: '#818cf8', notes: 'Token: obtenelo en https://tactiq.io/settings → MCP Integration',
+        is_enabled: true, is_builtin: true, created_at: now, updated_at: now,
+      });
+      tactiqSkill = await skillsCol.findOne({ _id: result.insertedId });
+    }
+    const tactiqSkillId = tactiqSkill!._id!;
+
+    // Upsert tool stubs
+    const toolDefs = [
+      {
+        skill_id: tactiqSkillId.toString(), tool_id: 'tactiq_search_tool', label: 'tactiq.search',
+        fn: 'tactiq_search_meeting_transcripts', category: 'Tactiq', color: '#818cf8',
+        description: 'Buscar en las transcripciones de reuniones de Tactiq usando lenguaje natural.',
+        inputs: [{ name: 'query', type: 'string', required: true, desc: 'Pregunta o términos de búsqueda' }],
+        output: 'Lista de fragmentos relevantes de transcripciones.',
+      },
+      {
+        skill_id: tactiqSkillId.toString(), tool_id: 'tactiq_transcript_tool', label: 'tactiq.transcript',
+        fn: 'tactiq_get_meeting_transcript', category: 'Tactiq', color: '#818cf8',
+        description: 'Obtener la transcripción completa de una reunión.',
+        inputs: [{ name: 'meeting_id', type: 'string', required: true, desc: 'ID de la reunión' }],
+        output: 'Transcripción completa con timestamps y participantes.',
+      },
+      {
+        skill_id: tactiqSkillId.toString(), tool_id: 'tactiq_list_tool', label: 'tactiq.list',
+        fn: 'tactiq_get_recent_meetings', category: 'Tactiq', color: '#818cf8',
+        description: 'Listar reuniones recientes de Tactiq.',
+        inputs: [{ name: 'limit', type: 'number', desc: 'Cantidad de reuniones (default 10)' }],
+        output: '{ id, title, date, participants, platform }[]',
+      },
+    ];
+
+    const toolIds: string[] = [];
+    for (const def of toolDefs) {
+      const existing = await toolsCol.findOne({ user_id: userId, tool_id: def.tool_id });
+      if (existing) {
+        toolIds.push(existing._id!.toString());
+      } else {
+        const r = await toolsCol.insertOne({
+          user_id: userId, ...def,
+          endpoint: '', auth_type: 'none', rate_limit: '', timeout_ms: '30000', notes: '',
+          is_builtin: true, created_at: now, updated_at: now,
+        });
+        toolIds.push(r.insertedId.toString());
+      }
+    }
+    await skillsCol.updateOne({ _id: tactiqSkillId }, { $set: { tool_ids: toolIds, updated_at: now } });
+
+    // Upsert Meeting Agent
+    const existingAgent = await agentsCol.findOne({ user_id: userId, agent_id: 'agent-tactiq' });
+    if (!existingAgent) {
+      await agentsCol.insertOne({
+        user_id: userId, label: 'Meeting Agent', agent_id: 'agent-tactiq',
+        description: 'Especialista en reuniones vía Tactiq. Busca y resume transcripciones de Google Meet, Zoom y Teams.',
+        system_prompt: 'Sos un agente especializado en reuniones vía Tactiq. Podés buscar transcripciones, obtener el contenido completo de una reunión y resumir lo hablado. Respondé siempre en el idioma del usuario.',
+        skill_ids: [tactiqSkillId.toString()],
+        process_ids: [], model: 'gpt-4o', color: '#818cf8',
+        is_enabled: true, is_builtin: true, created_at: now, updated_at: now,
+      } as OrchAgent);
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Orchestration] reseed-tactiq error:', err);
+    res.status(500).json({ error: 'Failed to reseed Tactiq' });
+  }
+});
+
 // ── POST /orchestration/reseed-behavioral-skills ──────────────────────────────
 // Upserts the 5 built-in behavioral skills for the current user.
 // Safe to call multiple times — uses updateOne with upsert per skill_id.
