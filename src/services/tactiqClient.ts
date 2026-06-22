@@ -1,17 +1,65 @@
 import crypto from 'crypto';
 import { getTactiqTokens, saveTactiqTokens, TactiqTokens } from '../db/users.js';
 
-// ── Tactiq MCP Client (OAuth 2.0 + PKCE, public client) ──────────────────────
+// ── Tactiq MCP Client (OAuth 2.0 + PKCE + Dynamic Client Registration) ───────
 // Remote MCP server at https://mcp.tactiq.io
-// Auth: Authorization Code + PKCE, no client_secret required.
+// Auth: Authorization Code + PKCE + RFC 7591 Dynamic Client Registration.
+// Tactiq requires DCR — there is no pre-registered static client_id.
 
-const MCP_BASE  = 'https://mcp.tactiq.io';
-const AUTH_URL  = 'https://mcp.tactiq.io/oauth/authorize';
-const TOKEN_URL = 'https://mcp.tactiq.io/oauth/token';
-const SCOPES    = 'mcp:meetings:own mcp:meetings:shared mcp:meetings:spaces mcp:meetings:details';
+const MCP_BASE    = 'https://mcp.tactiq.io';
+const AUTH_URL    = 'https://mcp.tactiq.io/oauth/authorize';
+const TOKEN_URL   = 'https://mcp.tactiq.io/oauth/token';
+const REGISTER_URL = 'https://mcp.tactiq.io/oauth/register';
+const SCOPES       = 'mcp:meetings:own mcp:meetings:shared mcp:meetings:spaces mcp:meetings:details';
 
-// The client_id for CAIRO — used as the OAuth app identifier (no secret needed)
-const CLIENT_ID = 'cairo-mcp-client';
+interface DcrResult {
+  client_id:      string;
+  client_secret?: string;
+}
+
+// In-memory cache — survives for the process lifetime, re-registered on restart.
+let _cachedDcr: DcrResult | null = null;
+
+/**
+ * Dynamic Client Registration (RFC 7591).
+ * Returns { client_id, client_secret? } registered with Tactiq's OAuth server.
+ * If Tactiq issues a client_secret (confidential client), it's captured and
+ * propagated through the token exchange and stored with the user's tokens.
+ */
+export async function getOrRegisterClient(redirectUri: string): Promise<DcrResult> {
+  if (_cachedDcr) return _cachedDcr;
+
+  const res = await fetch(REGISTER_URL, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      client_name:   'CAIRO',
+      redirect_uris: [redirectUri],
+      grant_types:   ['authorization_code', 'refresh_token'],
+      response_types: ['code'],
+      scope:          SCOPES,
+    }),
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  const body = await res.text();
+  console.log('[Tactiq] DCR response', res.status, body.slice(0, 500));
+
+  if (!res.ok) throw new Error(`Tactiq DCR failed (${res.status}): ${body.slice(0, 300)}`);
+
+  const data = JSON.parse(body) as { client_id?: string; client_secret?: string; error?: string };
+  if (data.error) throw new Error(`Tactiq DCR error: ${data.error}`);
+  if (!data.client_id) throw new Error('Tactiq DCR: no client_id in response');
+
+  _cachedDcr = { client_id: data.client_id, client_secret: data.client_secret };
+  console.log('[Tactiq] Dynamic client registered:', data.client_id, data.client_secret ? '(confidential)' : '(public)');
+  return _cachedDcr;
+}
+
+/** Kept for back-compat with any callers that only need client_id. */
+export async function getOrRegisterClientId(redirectUri: string): Promise<string> {
+  return (await getOrRegisterClient(redirectUri)).client_id;
+}
 
 // ── PKCE helpers ──────────────────────────────────────────────────────────────
 
@@ -23,45 +71,62 @@ export function generateCodeChallenge(verifier: string): string {
   return crypto.createHash('sha256').update(verifier).digest('base64url');
 }
 
-export function buildAuthorizationUrl(redirectUri: string, state: string, codeChallenge: string): string {
+export function buildAuthorizationUrl(
+  redirectUri:   string,
+  state:         string,
+  codeChallenge: string,
+  clientId:      string,
+): string {
   const params = new URLSearchParams({
-    response_type:          'code',
-    client_id:              CLIENT_ID,
-    redirect_uri:           redirectUri,
-    scope:                  SCOPES,
+    response_type:         'code',
+    client_id:             clientId,
+    redirect_uri:          redirectUri,
+    scope:                 SCOPES,
     state,
-    code_challenge:         codeChallenge,
-    code_challenge_method:  'S256',
+    code_challenge:        codeChallenge,
+    code_challenge_method: 'S256',
   });
   return `${AUTH_URL}?${params.toString()}`;
 }
 
 export async function exchangeCodeForTokens(
-  code:        string,
-  redirectUri: string,
-  verifier:    string,
+  code:          string,
+  redirectUri:   string,
+  verifier:      string,
+  clientId:      string,
+  clientSecret?: string,
 ): Promise<TactiqTokens> {
-  const body = new URLSearchParams({
+  const params = new URLSearchParams({
     grant_type:    'authorization_code',
-    client_id:     CLIENT_ID,
     code,
     redirect_uri:  redirectUri,
     code_verifier: verifier,
   });
 
+  const headers: Record<string, string> = { 'Content-Type': 'application/x-www-form-urlencoded' };
+
+  if (clientSecret) {
+    // Confidential client — authenticate via HTTP Basic (RFC 6749 §2.3.1)
+    const cred = Buffer.from(`${encodeURIComponent(clientId)}:${encodeURIComponent(clientSecret)}`).toString('base64');
+    headers['Authorization'] = `Basic ${cred}`;
+  } else {
+    // Public client — include client_id in body
+    params.set('client_id', clientId);
+  }
+
   const res = await fetch(TOKEN_URL, {
     method:  'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body:    body.toString(),
+    headers,
+    body:    params.toString(),
     signal:  AbortSignal.timeout(15_000),
   });
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Tactiq token exchange failed (${res.status}): ${text.slice(0, 200)}`);
-  }
+  const text = await res.text().catch(() => '');
+  console.log('[Tactiq] token exchange', res.status, text.slice(0, 300));
 
-  const data = await res.json() as {
+  if (!res.ok) throw new Error(`Tactiq token exchange failed (${res.status}): ${text.slice(0, 200)}`);
+
+  const data = JSON.parse(text) as {
     access_token:  string;
     refresh_token?: string;
     expires_in?:   number;
@@ -76,7 +141,9 @@ export async function exchangeCodeForTokens(
     access_token:  data.access_token,
     refresh_token: data.refresh_token,
     expiry,
-    scopes: (data.scope ?? SCOPES).split(' '),
+    scopes:        (data.scope ?? SCOPES).split(' '),
+    client_id:     clientId,
+    client_secret: clientSecret,
   };
 }
 
@@ -84,32 +151,42 @@ async function refreshAccessToken(userId: string, tokens: TactiqTokens): Promise
   if (!tokens.refresh_token) return null;
 
   try {
-    const body = new URLSearchParams({
+    const params = new URLSearchParams({
       grant_type:    'refresh_token',
-      client_id:     CLIENT_ID,
       refresh_token: tokens.refresh_token,
     });
 
+    const headers: Record<string, string> = { 'Content-Type': 'application/x-www-form-urlencoded' };
+
+    if (tokens.client_secret) {
+      const cred = Buffer.from(`${encodeURIComponent(tokens.client_id)}:${encodeURIComponent(tokens.client_secret)}`).toString('base64');
+      headers['Authorization'] = `Basic ${cred}`;
+    } else {
+      params.set('client_id', tokens.client_id);
+    }
+
     const res = await fetch(TOKEN_URL, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body:    body.toString(),
+      headers,
+      body:    params.toString(),
       signal:  AbortSignal.timeout(10_000),
     });
 
     if (!res.ok) return null;
 
     const data = await res.json() as {
-      access_token: string;
+      access_token:  string;
       refresh_token?: string;
-      expires_in?: number;
+      expires_in?:   number;
     };
 
     const fresh: TactiqTokens = {
-      access_token:  data.access_token,
-      refresh_token: data.refresh_token ?? tokens.refresh_token,
-      expiry:        data.expires_in ? new Date(Date.now() + data.expires_in * 1000).toISOString() : undefined,
-      scopes:        tokens.scopes,
+      access_token:   data.access_token,
+      refresh_token:  data.refresh_token ?? tokens.refresh_token,
+      expiry:         data.expires_in ? new Date(Date.now() + data.expires_in * 1000).toISOString() : undefined,
+      scopes:         tokens.scopes,
+      client_id:      tokens.client_id,
+      client_secret:  tokens.client_secret, // carry forward
     };
 
     await saveTactiqTokens(userId, fresh);

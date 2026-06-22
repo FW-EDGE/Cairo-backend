@@ -21,10 +21,12 @@ export interface GoogleTokens {
 }
 
 export interface TactiqTokens {
-  access_token:  string;
-  refresh_token?: string;
-  expiry?:       string; // ISO string
-  scopes:        string[];
+  access_token:   string;
+  refresh_token?:  string;
+  expiry?:        string; // ISO string
+  scopes:         string[];
+  client_id:      string; // from Dynamic Client Registration
+  client_secret?: string; // issued by DCR if server is confidential
 }
 
 export interface ChatUsage {

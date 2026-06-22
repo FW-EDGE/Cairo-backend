@@ -346,6 +346,7 @@ import {
   generateCodeVerifier,
   generateCodeChallenge,
   exchangeCodeForTokens,
+  getOrRegisterClient,
   clearTactiqCache,
 } from '../services/tactiqClient.js';
 import { saveTactiqTokens, getTactiqTokens, clearTactiqTokens } from '../db/users.js';
@@ -357,18 +358,21 @@ router.get('/auth/tactiq', requireUser, async (req: Request, res: Response) => {
     const redirectUri = (config as any).TACTIQ_REDIRECT_URI ?? process.env.TACTIQ_REDIRECT_URI ?? '';
     if (!redirectUri) { res.status(500).json({ error: 'TACTIQ_REDIRECT_URI no configurado' }); return; }
 
-    const verifier   = generateCodeVerifier();
-    const challenge  = generateCodeChallenge(verifier);
-    const state      = crypto.randomBytes(16).toString('hex');
+    // Dynamic Client Registration — get (or reuse cached) credentials from Tactiq
+    const { client_id: clientId, client_secret: clientSecret } = await getOrRegisterClient(redirectUri);
 
-    // Store state + verifier + user_id in oauthStates (TTL 10 min)
-    await saveOAuthState(state, { flow: 'tactiq', user_id: req.user!._id, verifier });
+    const verifier  = generateCodeVerifier();
+    const challenge = generateCodeChallenge(verifier);
+    const state     = crypto.randomBytes(16).toString('hex');
+
+    // Store state + verifier + user_id + client credentials in oauthStates (TTL 10 min)
+    await saveOAuthState(state, { flow: 'tactiq', user_id: req.user!._id, verifier, client_id: clientId, client_secret: clientSecret });
     res.cookie('tactiq_state', state, {
       httpOnly: true, path: '/', maxAge: 600_000,
       sameSite: IS_PROD ? 'none' : 'lax', secure: IS_PROD,
     });
 
-    const authUrl = buildAuthorizationUrl(redirectUri, state, challenge);
+    const authUrl = buildAuthorizationUrl(redirectUri, state, challenge, clientId);
     res.redirect(authUrl);
   } catch (err) {
     console.error('[Auth] /auth/tactiq error:', err);
@@ -392,14 +396,20 @@ router.get('/auth/tactiq/callback', async (req: Request, res: Response) => {
   }
 
   const meta = await popOAuthState(queryState);
-  if (!meta || meta.flow !== 'tactiq' || !meta.user_id || !meta.verifier) {
+  if (!meta || meta.flow !== 'tactiq' || !meta.user_id || !meta.verifier || !meta.client_id) {
     res.redirect(`${frontendUrl}/dashboard?tactiq_error=invalid_state`);
     return;
   }
 
   try {
     const redirectUri = (config as any).TACTIQ_REDIRECT_URI ?? process.env.TACTIQ_REDIRECT_URI ?? '';
-    const tokens = await exchangeCodeForTokens(code, redirectUri, meta.verifier as string);
+    const tokens = await exchangeCodeForTokens(
+      code,
+      redirectUri,
+      meta.verifier     as string,
+      meta.client_id    as string,
+      meta.client_secret as string | undefined,
+    );
     await saveTactiqTokens(meta.user_id as string, tokens);
     clearTactiqCache(meta.user_id as string);
     res.clearCookie('tactiq_state', { path: '/' });
