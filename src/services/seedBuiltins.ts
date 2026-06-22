@@ -4,6 +4,154 @@ import {
   OrchSkill, OrchTool, OrchAgent,
 } from '../db/orchestration.js';
 
+// ── Behavioral skill definitions (reused by seed + reseed endpoint) ───────────
+
+type BehavioralDef = Omit<OrchSkill, '_id' | 'user_id' | 'created_at' | 'updated_at'>;
+
+export const BEHAVIORAL_SKILL_DEFS: BehavioralDef[] = [
+  {
+    label: 'Redacción Formal', skill_id: 'redaccion_formal',
+    description: 'Aplica tono formal en español (usted) para emails, propuestas e informes.',
+    skill_category: 'behavioral',
+    prompt: `## Tono y registro
+Respondé y redactá siempre en español formal, usando "usted" como tratamiento de segunda persona. Evitá contracciones, voseo y lenguaje coloquial.
+
+## Estructura de documentos escritos
+- Comenzá con un párrafo de contexto breve (1-2 oraciones).
+- Desarrollá el cuerpo con párrafos cortos y precisos (máx. 4 oraciones cada uno).
+- Cerrá siempre con un llamado a la acción claro o un párrafo de cierre formal.
+- Usá "Estimado/a [nombre]:" como saludo y "Quedo a su disposición." como cierre en emails.
+
+## Estilo
+- No uses emojis ni lenguaje informal.
+- No uses términos técnicos sin definirlos primero.
+- Priorizá la claridad y la concisión sobre la extensión.
+- Cuando sea relevante, indicá plazos y responsables de forma explícita.`,
+    trigger: 'Cuando el usuario pida redactar emails, propuestas comerciales, informes o cualquier comunicación formal.',
+    provider: 'Custom', auth_type: 'None', skill_type: 'Built-in',
+    endpoint: '', rate_limit: '', tool_ids: [],
+    color: '#a78bfa', notes: '', is_enabled: true, is_builtin: true,
+  },
+  {
+    label: 'Síntesis Ejecutiva', skill_id: 'sintesis_ejecutiva',
+    description: 'Resume emails, documentos y conversaciones en formato ejecutivo.',
+    skill_category: 'behavioral',
+    prompt: `## Objetivo
+Resumí cualquier contenido extenso (email, documento, hilo, reunión) en un formato ejecutivo claro y accionable.
+
+## Formato de síntesis
+Usá siempre esta estructura:
+
+**📌 En una línea:** [Una oración que captura la esencia del contenido]
+
+**Puntos clave:**
+- [Máx. 5 puntos, ordenados por importancia]
+
+**Acción requerida:** [Qué necesita hacer el usuario, si aplica. Si no hay acción, omití esta sección.]
+
+**Contexto adicional:** [Solo si hay información de fondo importante que el usuario deba conocer. Opcional.]
+
+## Reglas
+- El resumen nunca debe superar el 20% del largo original.
+- No incluyas información redundante ni ejemplos del texto fuente.
+- Si el contenido no requiere acción, aclaralo explícitamente.
+- Sé directo: el usuario lee esto para decidir qué hacer a continuación.`,
+    trigger: 'Cuando el usuario pida resumir, sintetizar o dar un overview de emails, documentos, conversaciones o reuniones.',
+    provider: 'Custom', auth_type: 'None', skill_type: 'Built-in',
+    endpoint: '', rate_limit: '', tool_ids: [],
+    color: '#a78bfa', notes: '', is_enabled: true, is_builtin: true,
+  },
+  {
+    label: 'Extractor de Action Items', skill_id: 'extractor_action_items',
+    description: 'Detecta y estructura tareas y compromisos de cualquier texto.',
+    skill_category: 'behavioral',
+    prompt: `## Objetivo
+Identificá y estructurá todos los action items, compromisos y pendientes presentes en el texto analizado.
+
+## Formato de salida
+Para cada action item encontrado, mostrá:
+
+- [ ] **[Qué]** — descripción concisa de la tarea
+  - 👤 **Responsable:** [nombre o "No especificado"]
+  - 📅 **Fecha límite:** [fecha o "No especificada"]
+  - 🔗 **Contexto:** [de dónde viene este item, ej: "Email de Juan - Asunto: Revisión propuesta"]
+
+## Reglas de extracción
+- Incluí solo compromisos explícitos o implícitos claros — no interpretaciones forzadas.
+- Si un texto no contiene action items, respondé: "No se encontraron action items en este contenido."
+- Priorizá los items donde el usuario es el responsable al principio de la lista.
+- Ordená por fecha límite (más próxima primero) cuando esté disponible.
+- Si encontrás dependencias entre items, indicalo con ↳ en el item dependiente.`,
+    trigger: 'Cuando el usuario pida extraer tareas, action items, pendientes o compromisos de emails, reuniones o conversaciones.',
+    provider: 'Custom', auth_type: 'None', skill_type: 'Built-in',
+    endpoint: '', rate_limit: '', tool_ids: [],
+    color: '#a78bfa', notes: '', is_enabled: true, is_builtin: true,
+  },
+  {
+    label: 'Triaje de Urgencia', skill_id: 'triage_urgencia',
+    description: 'Clasifica emails, tareas o mensajes por urgencia e importancia.',
+    skill_category: 'behavioral',
+    prompt: `## Objetivo
+Clasificá cada item según su urgencia e importancia usando una matriz simplificada.
+
+## Categorías
+🔴 **CRÍTICO** — Urgente + Importante: requiere atención hoy, tiene consecuencias significativas si se demora.
+🟠 **PRIORITARIO** — No urgente + Importante: debe planificarse esta semana, impacto estratégico.
+🟡 **ATENDER** — Urgente + No importante: responder rápido pero puede delegarse o automatizarse.
+⚪ **BACKLOG** — No urgente + No importante: puede postergarse, revisar cuando haya tiempo libre.
+
+## Formato de respuesta
+Para cada item clasificado:
+
+**[CATEGORÍA] [emoji]** — [Título o asunto del item]
+> [1 oración explicando el criterio de clasificación]
+
+Al final, mostrá un resumen:
+- 🔴 Crítico: N items
+- 🟠 Prioritario: N items
+- 🟡 Atender: N items
+- ⚪ Backlog: N items
+
+## Criterios de clasificación
+- **Urgencia**: ¿Tiene fecha límite en las próximas 24-48h? ¿Hay alguien esperando respuesta?
+- **Importancia**: ¿Afecta objetivos clave del negocio, relaciones importantes o decisiones estratégicas?`,
+    trigger: 'Cuando el usuario tenga una lista de emails, tareas o mensajes y necesite saber por dónde empezar.',
+    provider: 'Custom', auth_type: 'None', skill_type: 'Built-in',
+    endpoint: '', rate_limit: '', tool_ids: [],
+    color: '#a78bfa', notes: '', is_enabled: true, is_builtin: true,
+  },
+  {
+    label: 'Respuestas Estructuradas', skill_id: 'respuestas_estructuradas',
+    description: 'Formato consistente y escaneable para todas las respuestas.',
+    skill_category: 'behavioral',
+    prompt: `## Principios de formato
+Todas tus respuestas deben ser fáciles de escanear visualmente. Aplicá estas reglas:
+
+## Cuándo usar cada elemento
+- **Negrita** → términos clave, nombres propios, valores importantes, decisiones
+- *Itálica* → contexto, aclaraciones, términos técnicos la primera vez que aparecen
+- \`código\` → IDs, fechas en formato ISO, parámetros, comandos, emails
+- Listas con guión → items sin orden jerárquico (3 o más elementos)
+- Listas numeradas → pasos secuenciales o prioridades ordenadas
+- Tablas → comparaciones con 3+ atributos o 4+ items
+- \`\`\`bloque\`\`\` → JSON, código, contenido de archivos, datos estructurados largos
+
+## Estructura de respuesta
+1. **Respuesta directa primero** — nunca empieces con contexto o explicaciones largas.
+2. **Desarrollo** — solo si el usuario necesita entender el razonamiento.
+3. **Próximos pasos** — solo si hay una acción clara a tomar.
+
+## Longitud
+- Respuesta simple: 1-3 oraciones o una lista corta.
+- Respuesta compleja: secciones con headers \`##\`, sin exceder lo necesario.
+- Nunca añadas conclusiones ni resúmenes al final de respuestas que ya son concisas.`,
+    trigger: 'Siempre activo — define el estilo de formato de todas las respuestas del agente.',
+    provider: 'Custom', auth_type: 'None', skill_type: 'Built-in',
+    endpoint: '', rate_limit: '', tool_ids: [],
+    color: '#a78bfa', notes: '', is_enabled: true, is_builtin: true,
+  },
+];
+
 // Seeds built-in skills, tools and agents for a user on first access.
 // Idempotent — skips if built-in nodes already exist.
 export async function seedBuiltins(userId: ObjectId): Promise<void> {
@@ -137,7 +285,15 @@ export async function seedBuiltins(userId: ObjectId): Promise<void> {
     skillsCol.updateOne({ _id: calId },   { $set: { tool_ids: [toolIds[3], toolIds[4], toolIds[5]] } }),
   ]);
 
-  // ── 4. Built-in agents (3 specialized — one per skill) ────────────────────
+  // ── 4. Behavioral skills ──────────────────────────────────────────────────
+  const behavioralSkills: OrchSkill[] = BEHAVIORAL_SKILL_DEFS.map(def => ({
+    ...def, user_id: userId, created_at: now, updated_at: now,
+  }));
+
+  await skillsCol.insertMany(behavioralSkills);
+
+
+  // ── 5. Built-in agents (3 specialized — one per skill) ────────────────────
   const agentDocs: OrchAgent[] = [
     {
       user_id: userId, label: 'Gmail Agent', agent_id: 'agent-gmail',

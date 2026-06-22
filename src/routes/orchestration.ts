@@ -6,7 +6,7 @@ import {
   OrchSkill, OrchTool, OrchAgent, OrchProcess,
 } from '../db/orchestration.js';
 import { runProcess } from '../services/processRunner.js';
-import { seedBuiltins } from '../services/seedBuiltins.js';
+import { seedBuiltins, BEHAVIORAL_SKILL_DEFS } from '../services/seedBuiltins.js';
 
 const router = Router();
 
@@ -446,6 +446,33 @@ router.post('/orchestration/reseed-agents', requireUser, async (req: Request, re
   } catch (err) {
     console.error('[Orchestration] reseed-agents error:', err);
     res.status(500).json({ error: 'Failed to reseed agents' });
+  }
+});
+
+// ── POST /orchestration/reseed-behavioral-skills ──────────────────────────────
+// Upserts the 5 built-in behavioral skills for the current user.
+// Safe to call multiple times — uses updateOne with upsert per skill_id.
+router.post('/orchestration/reseed-behavioral-skills', requireUser, async (req: Request, res: Response) => {
+  try {
+    const userId = new ObjectId(req.user!._id.toString());
+    const col    = await orchSkillsCol();
+    const now    = new Date();
+
+    await Promise.all(
+      BEHAVIORAL_SKILL_DEFS.map(def =>
+        col.updateOne(
+          { user_id: userId, skill_id: def.skill_id },
+          { $set: { ...def, user_id: userId, updated_at: now, is_builtin: true },
+            $setOnInsert: { created_at: now } },
+          { upsert: true },
+        )
+      )
+    );
+
+    res.json({ ok: true, count: BEHAVIORAL_SKILL_DEFS.length });
+  } catch (err) {
+    console.error('[Orchestration] reseed-behavioral-skills error:', err);
+    res.status(500).json({ error: 'Failed to reseed behavioral skills' });
   }
 });
 
