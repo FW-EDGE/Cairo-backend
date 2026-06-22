@@ -29,6 +29,17 @@ import { ObjectId } from 'mongodb';
 const IS_PROD = process.env.NODE_ENV === 'production';
 const router = Router();
 
+// Returns the origin if it's safe to redirect to (localhost in dev, or the configured frontend URL).
+function safeOrigin(origin: string | undefined, fallback: string): string {
+  if (!origin) return fallback;
+  try {
+    const u = new URL(origin);
+    if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') return origin;
+    if (origin === fallback) return origin;
+  } catch { /* ignore */ }
+  return fallback;
+}
+
 function setCairoTokenCookie(res: Response, token: string): void {
   res.cookie(COOKIE_NAME, token, {
     httpOnly: true,
@@ -52,11 +63,13 @@ function toFrontendUser(user: ReturnType<typeof serialize>) {
 }
 
 // GET /auth/google — start OAuth flow
-router.get('/auth/google', async (_req: Request, res: Response) => {
+router.get('/auth/google', async (req: Request, res: Response) => {
   try {
+    const config  = getConfig();
+    const origin  = safeOrigin(req.headers.origin as string | undefined, config.auth.frontend_url);
     const client = createOAuth2Client();
     const { url, state } = getAuthUrl(client);
-    await saveOAuthState(state, { flow: 'login' });
+    await saveOAuthState(state, { flow: 'login', redirect_origin: origin });
     res.cookie('oauth_state', state, { httpOnly: true, path: '/', maxAge: 600_000 });
     res.redirect(url);
   } catch (err) {
@@ -152,6 +165,9 @@ router.get('/auth/google/callback', async (req: Request, res: Response) => {
   const meta = await popOAuthState(queryState);
   if (!meta) { res.redirect(`${config.auth.frontend_url}/login?error=invalid_state`); return; }
 
+  // Use the origin that started the login flow (supports localhost dev)
+  const frontendBase = (meta.redirect_origin as string | undefined) ?? config.auth.frontend_url;
+
   try {
     const { client, tokens } = await exchangeCode(code);
     const googleUserInfo = await getUserInfo(client);
@@ -165,7 +181,7 @@ router.get('/auth/google/callback', async (req: Request, res: Response) => {
       const { updateGoogleTokens } = await import('../db/users.js');
       await updateGoogleTokens(meta.user_id as string, storedTokens);
       res.clearCookie('oauth_state', { path: '/' });
-      res.redirect(`${config.auth.frontend_url}/dashboard?reauth=success`);
+      res.redirect(`${frontendBase}/dashboard?reauth=success`);
 
     } else if (meta.flow === 'connect' && meta.user_id) {
       const user = await connectGoogleUser(
@@ -177,7 +193,7 @@ router.get('/auth/google/callback', async (req: Request, res: Response) => {
       const token = createToken(user._id, user.email, user.tier);
       setCairoTokenCookie(res, token);
       res.clearCookie('oauth_state', { path: '/' });
-      res.redirect(`${config.auth.frontend_url}/onboarding?connected=true`);
+      res.redirect(`${frontendBase}/onboarding?connected=true`);
     } else {
       const user = await upsertGoogleUser(
         googleUserInfo.google_id,
@@ -189,7 +205,7 @@ router.get('/auth/google/callback', async (req: Request, res: Response) => {
       const token = createToken(user._id, user.email, user.tier);
       setCairoTokenCookie(res, token);
       res.clearCookie('oauth_state', { path: '/' });
-      res.redirect(`${config.auth.frontend_url}/auth/callback`);
+      res.redirect(`${frontendBase}/auth/callback`);
     }
   } catch (err) {
     console.error('[Auth] callback error:', err);
