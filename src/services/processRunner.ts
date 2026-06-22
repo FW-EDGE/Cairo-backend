@@ -197,17 +197,31 @@ async function resolveAgent(agentId: string, userId: string): Promise<AgentConfi
             }).toArray()
           : [];
 
-        const allToolIds = skills.flatMap(s => s.tool_ids);
+        // Separate integration skills (→ tools) from behavioral skills (→ prompt injection)
+        const integrationSkills = skills.filter(s => !s.skill_category || s.skill_category === 'integration');
+        const behavioralSkills  = skills.filter(s => s.skill_category === 'behavioral');
+
+        const allToolIds = integrationSkills.flatMap(s => s.tool_ids);
         const tools = allToolIds.length > 0
           ? await toolsCol.find({
               _id: { $in: allToolIds.filter(id => ObjectId.isValid(id)).map(id => new ObjectId(id)) },
             }).toArray()
           : [];
 
+        // Build system prompt: agent base + behavioral skill instructions
+        const systemParts: string[] = [
+          dbAgent.system_prompt?.trim() || `Sos ${dbAgent.label}. Completá la tarea asignada.`,
+        ];
+        for (const sk of behavioralSkills) {
+          if (sk.prompt?.trim()) {
+            systemParts.push(`\n\n---\nSKILL: ${sk.label}\n${sk.prompt.trim()}`);
+          }
+        }
+
         return {
           id:           dbAgent._id!.toString(),
           label:        dbAgent.label,
-          systemPrompt: dbAgent.system_prompt?.trim() || `Sos ${dbAgent.label}. Completá la tarea asignada.`,
+          systemPrompt: systemParts.join(''),
           toolFns:      tools.map(t => t.fn).filter(Boolean),
           model:        dbAgent.model || 'gpt-4o',
         };

@@ -9,6 +9,9 @@ export interface OrchSkill {
   label: string;
   skill_id: string;
   description: string;
+  // skill_category distinguishes integration connectors from behavioral instruction modules
+  skill_category?: 'integration' | 'behavioral';
+  // Integration fields
   prompt: string;
   provider: string;
   auth_type: string;
@@ -16,6 +19,8 @@ export interface OrchSkill {
   endpoint: string;
   rate_limit: string;
   tool_ids: string[];
+  // Behavioral fields — prompt holds instruction content; trigger describes when to activate
+  trigger?: string;
   color: string;
   notes: string;
   is_enabled: boolean;
