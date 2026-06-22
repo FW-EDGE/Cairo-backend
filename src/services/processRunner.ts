@@ -140,22 +140,29 @@ interface AgentConfig {
 }
 
 const STATIC_AGENTS: Record<string, Omit<AgentConfig, 'id'>> = {
+  'agent-gmail': {
+    label:        'Gmail Agent',
+    systemPrompt: 'Sos un agente especializado en Gmail. Tu trabajo es buscar emails, leer su contenido y extraer información relevante. Usá las herramientas de búsqueda para encontrar los mensajes correctos antes de leerlos. Respondé siempre en el idioma del usuario.',
+    toolFns:      ['search_gmail', 'read_email'],
+    model:        'gpt-4o',
+  },
+  'agent-drive': {
+    label:        'Drive Agent',
+    systemPrompt: 'Sos un agente especializado en Google Drive. Tu trabajo es acceder y leer el contenido de archivos y documentos. Extraé información relevante, resumí documentos y respondé preguntas basándote en su contenido. Respondé siempre en el idioma del usuario.',
+    toolFns:      ['read_drive_file'],
+    model:        'gpt-4o',
+  },
+  'agent-calendar': {
+    label:        'Calendar Agent',
+    systemPrompt: 'Sos un agente especializado en Google Calendar y Contactos. Tu trabajo es consultar la agenda, crear eventos, buscar disponibilidad y gestionar contactos. Siempre confirmá los detalles antes de crear eventos. Respondé siempre en el idioma del usuario.',
+    toolFns:      ['list_calendar_events', 'create_calendar_event', 'search_contacts'],
+    model:        'gpt-4o',
+  },
+  // Legacy fallback — kept so old processes referencing agent-cairo don't break
   'agent-cairo': {
     label:        'CAIRO Main',
     systemPrompt: 'Sos CAIRO, un agente de asistencia general con acceso a Gmail, Drive y Calendar del usuario. Completá la tarea asignada con precisión y detalle.',
     toolFns:      ['search_gmail', 'read_email', 'read_drive_file', 'search_contacts', 'list_calendar_events', 'create_calendar_event'],
-    model:        'gpt-4o',
-  },
-  'agent-research': {
-    label:        'Research',
-    systemPrompt: 'Sos un agente de investigación. Buscá, leé y sintetizá información relevante de Gmail y Drive. Sé exhaustivo.',
-    toolFns:      ['search_gmail', 'read_email', 'read_drive_file'],
-    model:        'gpt-4o',
-  },
-  'agent-pm': {
-    label:        'PM Agent',
-    systemPrompt: 'Sos un agente de gestión de proyectos. Accedé a Calendar, buscá contactos y organizá la agenda según se te pida.',
-    toolFns:      ['list_calendar_events', 'create_calendar_event', 'search_contacts'],
     model:        'gpt-4o',
   },
 };

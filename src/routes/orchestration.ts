@@ -396,4 +396,55 @@ router.delete('/orchestration/processes/:id', requireUser, async (req: Request, 
   }
 });
 
+// ── POST /orchestration/reseed-agents ────────────────────────────────────────
+// One-time migration: deletes all builtin agents and re-seeds the 3 specialized ones.
+router.post('/orchestration/reseed-agents', requireUser, async (req: Request, res: Response) => {
+  try {
+    const userId     = new ObjectId(req.user!._id.toString());
+    const agentsCol  = await orchAgentsCol();
+    const skillsCol  = await orchSkillsCol();
+
+    await agentsCol.deleteMany({ user_id: userId, is_builtin: true });
+
+    const [gmailSkill, driveSkill, calSkill] = await Promise.all([
+      skillsCol.findOne({ user_id: userId, skill_id: 'gmail_api' }),
+      skillsCol.findOne({ user_id: userId, skill_id: 'drive_api' }),
+      skillsCol.findOne({ user_id: userId, skill_id: 'calendar_api' }),
+    ]);
+
+    const now = new Date();
+    await agentsCol.insertMany([
+      {
+        user_id: userId, label: 'Gmail Agent', agent_id: 'agent-gmail',
+        description: 'Especialista en Gmail. Busca, lee y resume emails con precisión.',
+        system_prompt: 'Sos un agente especializado en Gmail. Tu trabajo es buscar emails, leer su contenido y extraer información relevante. Usá las herramientas de búsqueda para encontrar los mensajes correctos antes de leerlos. Respondé siempre en el idioma del usuario.',
+        skill_ids: gmailSkill ? [gmailSkill._id.toString()] : [],
+        process_ids: [], model: 'gpt-4o', color: '#22d3ee',
+        is_enabled: true, is_builtin: true, created_at: now, updated_at: now,
+      },
+      {
+        user_id: userId, label: 'Drive Agent', agent_id: 'agent-drive',
+        description: 'Especialista en Google Drive. Lee y analiza documentos y archivos.',
+        system_prompt: 'Sos un agente especializado en Google Drive. Tu trabajo es acceder y leer el contenido de archivos y documentos. Extraé información relevante, resumí documentos y respondé preguntas basándote en su contenido. Respondé siempre en el idioma del usuario.',
+        skill_ids: driveSkill ? [driveSkill._id.toString()] : [],
+        process_ids: [], model: 'gpt-4o', color: '#22d3ee',
+        is_enabled: true, is_builtin: true, created_at: now, updated_at: now,
+      },
+      {
+        user_id: userId, label: 'Calendar Agent', agent_id: 'agent-calendar',
+        description: 'Especialista en Google Calendar. Gestiona eventos, agenda y contactos.',
+        system_prompt: 'Sos un agente especializado en Google Calendar y Contactos. Tu trabajo es consultar la agenda, crear eventos, buscar disponibilidad y gestionar contactos. Siempre confirmá los detalles antes de crear eventos. Respondé siempre en el idioma del usuario.',
+        skill_ids: calSkill ? [calSkill._id.toString()] : [],
+        process_ids: [], model: 'gpt-4o', color: '#22d3ee',
+        is_enabled: true, is_builtin: true, created_at: now, updated_at: now,
+      },
+    ] as OrchAgent[]);
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Orchestration] reseed-agents error:', err);
+    res.status(500).json({ error: 'Failed to reseed agents' });
+  }
+});
+
 export default router;

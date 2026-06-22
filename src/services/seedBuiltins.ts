@@ -137,28 +137,28 @@ export async function seedBuiltins(userId: ObjectId): Promise<void> {
     skillsCol.updateOne({ _id: calId },   { $set: { tool_ids: [toolIds[3], toolIds[4], toolIds[5]] } }),
   ]);
 
-  // ── 4. Built-in agents ─────────────────────────────────────────────────────
+  // ── 4. Built-in agents (3 specialized — one per skill) ────────────────────
   const agentDocs: OrchAgent[] = [
     {
-      user_id: userId, label: 'CAIRO Main', agent_id: 'agent-cairo',
-      description: 'Agente de acceso completo: Drive, Gmail, Calendar, Contactos.',
-      system_prompt: 'Sos CAIRO, un asistente de productividad personal con acceso completo a Gmail, Drive y Calendar del usuario. Completá cada tarea con precisión, respondé en el idioma del usuario.',
-      skill_ids: [gmailId.toString(), driveId.toString(), calId.toString()],
+      user_id: userId, label: 'Gmail Agent', agent_id: 'agent-gmail',
+      description: 'Especialista en Gmail. Busca, lee y resume emails con precisión.',
+      system_prompt: 'Sos un agente especializado en Gmail. Tu trabajo es buscar emails, leer su contenido y extraer información relevante. Usá las herramientas de búsqueda para encontrar los mensajes correctos antes de leerlos. Respondé siempre en el idioma del usuario.',
+      skill_ids: [gmailId.toString()],
       process_ids: [], model: 'gpt-4o', color: '#22d3ee',
       is_enabled: true, is_builtin: true, created_at: now, updated_at: now,
     },
     {
-      user_id: userId, label: 'Research', agent_id: 'agent-research',
-      description: 'Agente de investigación. Busca, lee y sintetiza información de Gmail y Drive.',
-      system_prompt: 'Sos un agente de investigación. Buscá, leé y sintetizá información relevante de Gmail y Drive. Sé exhaustivo y citá las fuentes que encontrés.',
-      skill_ids: [gmailId.toString(), driveId.toString()],
+      user_id: userId, label: 'Drive Agent', agent_id: 'agent-drive',
+      description: 'Especialista en Google Drive. Lee y analiza documentos y archivos.',
+      system_prompt: 'Sos un agente especializado en Google Drive. Tu trabajo es acceder y leer el contenido de archivos y documentos. Extraé información relevante, resumí documentos y respondé preguntas basándote en su contenido. Respondé siempre en el idioma del usuario.',
+      skill_ids: [driveId.toString()],
       process_ids: [], model: 'gpt-4o', color: '#22d3ee',
       is_enabled: true, is_builtin: true, created_at: now, updated_at: now,
     },
     {
-      user_id: userId, label: 'PM Agent', agent_id: 'agent-pm',
-      description: 'Agente de gestión de proyectos. Maneja Calendar y Contactos.',
-      system_prompt: 'Sos un agente de gestión de proyectos. Accedé a Calendar para ver y crear eventos, buscá contactos y organizá la agenda según se te pida.',
+      user_id: userId, label: 'Calendar Agent', agent_id: 'agent-calendar',
+      description: 'Especialista en Google Calendar. Gestiona eventos, agenda y contactos.',
+      system_prompt: 'Sos un agente especializado en Google Calendar y Contactos. Tu trabajo es consultar la agenda, crear eventos, buscar disponibilidad y gestionar contactos. Siempre confirmá los detalles antes de crear eventos. Respondé siempre en el idioma del usuario.',
       skill_ids: [calId.toString()],
       process_ids: [], model: 'gpt-4o', color: '#22d3ee',
       is_enabled: true, is_builtin: true, created_at: now, updated_at: now,
