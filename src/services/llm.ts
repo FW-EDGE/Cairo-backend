@@ -297,6 +297,38 @@ export async function* getLlmStream(
   }
 }
 
+/**
+ * Fast routing check — given a user message and a list of process triggers,
+ * returns the matching process ID or null if nothing matches.
+ * Uses gpt-4o-mini at temperature=0 for deterministic, low-latency routing.
+ */
+export async function matchProcessTrigger(
+  message:  string,
+  triggers: { id: string; trigger: string; description: string }[],
+): Promise<string | null> {
+  if (triggers.length === 0) return null;
+
+  const client = getOpenAI();
+  const list   = triggers.map(t => `ID:${t.id} | Trigger:"${t.trigger}" | Descripción:${t.description}`).join('\n');
+
+  const completion = await client.chat.completions.create({
+    model:       'gpt-4o-mini',
+    temperature: 0,
+    max_tokens:  60,
+    messages: [{
+      role:    'user',
+      content: `Sos un router de procesos. Analizá si el mensaje del usuario coincide semánticamente con alguno de los siguientes triggers.\n\nMensaje: "${message}"\n\nTriggers:\n${list}\n\nSi hay coincidencia clara, respondé SOLO con el ID exacto. Si no hay coincidencia, respondé SOLO: none`,
+    }],
+  });
+
+  const answer = (completion.choices[0].message.content ?? '').trim();
+  if (!answer || answer.toLowerCase() === 'none') return null;
+
+  // Match the returned ID against known IDs (model sometimes adds extra text)
+  const matched = triggers.find(t => answer.includes(t.id));
+  return matched?.id ?? null;
+}
+
 export type StreamEvent =
   | { type: 'delta';      content: string }
   | { type: 'tool_calls'; calls: Array<{ id: string; function: { name: string; arguments: string } }> }

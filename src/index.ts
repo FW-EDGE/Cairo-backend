@@ -15,6 +15,7 @@ import cookieParser from "cookie-parser";
 import { WebSocketServer } from "ws";
 import { getConfig } from "./config.js";
 import { ensureIndexes } from "./db/oauthStates.js";
+import { ensureOrchIndexes } from "./db/orchestration.js";
 import { startHeartbeatMonitor, cairoState, connectedClients } from "./websocket.js";
 import { startScheduler } from "./services/scheduler.js";
 import { ensureJobIndexes, startIndexWorker } from "./services/indexingQueue.js";
@@ -31,6 +32,7 @@ import adminRouter from "./routes/admin.js";
 import semanticGraphRouter from "./routes/semanticGraph.js";
 import teamRouter from "./routes/team.js";
 import pmRouter from "./routes/pm.js";
+import orchestrationRouter from "./routes/orchestration.js";
 
 // Validate config at startup — log clearly but don't crash so the WS/health endpoints stay up
 let _startupConfigOk = false;
@@ -74,6 +76,7 @@ app.use(skillsRouter);
 app.use(semanticGraphRouter);
 app.use(teamRouter);
 app.use(pmRouter);
+app.use(orchestrationRouter);
 
 // Health check — also reports missing env vars so Render logs show the problem clearly
 app.get("/health", (_req, res) => {
@@ -139,6 +142,7 @@ async function start(): Promise<void> {
   // MongoDB + background services (non-fatal if slow)
   try {
     await ensureIndexes();
+    await ensureOrchIndexes();
     await ensureJobIndexes();
     startHeartbeatMonitor();
     startScheduler();

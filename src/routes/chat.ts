@@ -1,8 +1,9 @@
 import { Router, Request, Response } from 'express';
+import { ObjectId } from 'mongodb';
 import { requireUser } from '../auth/middleware.js';
 import { buildContextBlock } from '../services/rag.js';
 import {
-  getLlmStreamWithTools, StreamEvent,
+  getLlmStreamWithTools, matchProcessTrigger, StreamEvent,
   REPORT_TOOL, READ_FILE_TOOL,
   SEARCH_GMAIL_TOOL, READ_EMAIL_TOOL,
   SEARCH_CONTACTS_TOOL, LIST_CALENDAR_EVENTS_TOOL, CREATE_CALENDAR_EVENT_TOOL,
@@ -12,6 +13,8 @@ import { getGoogleTokens, incrementChatUsage, recordTokenUsage, TIER_LIMITS, Tie
 import { createDriveFolder, copyDriveFile, updateFileContent, getFileContent } from '../services/driveActions.js';
 import { searchGmail, readEmail } from '../services/gmailActions.js';
 import { searchContacts, listCalendarEvents, createCalendarEvent } from '../services/calendarActions.js';
+import { orchProcessesCol } from '../db/orchestration.js';
+import { runProcessInChat } from '../services/processRunner.js';
 
 const router = Router();
 
@@ -31,6 +34,38 @@ router.post('/chat', requireUser, async (req: Request, res: Response) => {
     const user = req.user!;
     const { message, history = [] } = req.body as { message: string; history?: any[] };
     if (!message) { send({ type: 'error', message: 'message is required' }); return; }
+
+    // ── Process trigger routing ───────────────────────────────────────────────
+    // Load processes with commands and ask gpt-4o-mini if this message matches.
+    // Runs before quota check so the routing cost is only paid when a process fires.
+    try {
+      const col       = await orchProcessesCol();
+      const processes = await col.find({
+        user_id:    new ObjectId(user._id),
+        command:    { $exists: true, $ne: '' },
+        is_enabled: true,
+      }).toArray();
+
+      if (processes.length > 0) {
+        const triggers = processes.map(p => ({
+          id:          p._id!.toString(),
+          trigger:     p.command,
+          description: p.description ?? '',
+        }));
+
+        const matchedId = await matchProcessTrigger(message, triggers);
+
+        if (matchedId) {
+          await incrementChatUsage(user._id);
+          await runProcessInChat(send, matchedId, message, user._id);
+          send({ type: 'done', tier: user.tier });
+          return;
+        }
+      }
+    } catch (err: any) {
+      console.error('[Chat] Process trigger routing failed:', err.message);
+      // Non-fatal — fall through to normal chat
+    }
 
     // ── Monthly quota check ───────────────────────────────────────────────────
     const tier  = (user.tier ?? 'free') as Tier;
