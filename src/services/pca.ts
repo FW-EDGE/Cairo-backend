@@ -77,9 +77,13 @@ function powerIteration(X: number[][], iters = PCA_ITERS): number[] {
 }
 
 function normalizeAxis(points: number[][], axis: number): number[] {
-  const vals  = points.map((p) => p[axis]);
-  const min   = Math.min(...vals);
-  const max   = Math.max(...vals);
+  const vals = points.map((p) => p[axis]);
+  // Avoid Math.min/max spread — can overflow the call stack with 15k+ points.
+  let min = Infinity, max = -Infinity;
+  for (const v of vals) {
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
   const range = max - min;
   return range === 0 ? vals.map(() => 0) : vals.map((v) => ((v - min) / range) * 2 - 1);
 }
@@ -144,7 +148,7 @@ export async function computeVectorMap(userId: string): Promise<VectorPoint[]> {
   let batchMeta: Omit<VectorPoint, 'x' | 'y' | 'z'>[] = [];
   const counts: Record<string, number> = {};
 
-  const flushBatch = () => {
+  const flushBatch = async () => {
     for (let i = 0; i < batchVecs.length; i++) {
       const c = batchVecs[i].map((v, j) => v - mean[j]); // center
       projected3D.push(pcs.map((pc) => dotProduct(c, pc)));
@@ -152,6 +156,8 @@ export async function computeVectorMap(userId: string): Promise<VectorPoint[]> {
     }
     batchVecs = [];
     batchMeta = [];
+    // Yield to the event loop so concurrent requests (chat, etc.) aren't starved.
+    await new Promise<void>(r => setImmediate(r));
   };
 
   for await (const doc of cursor) {
@@ -170,9 +176,9 @@ export async function computeVectorMap(userId: string): Promise<VectorPoint[]> {
       preview: String(doc.preview ?? ''),
     });
 
-    if (batchVecs.length >= STREAM_BATCH) flushBatch();
+    if (batchVecs.length >= STREAM_BATCH) await flushBatch();
   }
-  flushBatch(); // remaining docs
+  await flushBatch(); // remaining docs
 
   console.log(`[VectorMap] ${metadataArr.length} embeddings for user ${userId}:`, counts);
 

@@ -316,23 +316,33 @@ async function* runAgentStep(
     const tcAcc: Record<number, { id: string; name: string; arguments: string }> = {};
     let assistantContent = '';
 
-    for await (const chunk of stream) {
-      const delta = chunk.choices[0]?.delta;
-      if (!delta) continue;
+    try {
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta;
+        if (!delta) continue;
 
-      if (delta.content) {
-        assistantContent += delta.content;
-        fullOutput       += delta.content;
-        yield { type: 'delta', content: delta.content };
-      }
-
-      if (delta.tool_calls) {
-        for (const tc of delta.tool_calls) {
-          if (!tcAcc[tc.index]) tcAcc[tc.index] = { id: '', name: '', arguments: '' };
-          if (tc.id)                    tcAcc[tc.index].id        += tc.id;
-          if (tc.function?.name)        tcAcc[tc.index].name      += tc.function.name;
-          if (tc.function?.arguments)   tcAcc[tc.index].arguments += tc.function.arguments;
+        if (delta.content) {
+          assistantContent += delta.content;
+          fullOutput       += delta.content;
+          yield { type: 'delta', content: delta.content };
         }
+
+        if (delta.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            if (!tcAcc[tc.index]) tcAcc[tc.index] = { id: '', name: '', arguments: '' };
+            if (tc.id)                    tcAcc[tc.index].id        += tc.id;
+            if (tc.function?.name)        tcAcc[tc.index].name      += tc.function.name;
+            if (tc.function?.arguments)   tcAcc[tc.index].arguments += tc.function.arguments;
+          }
+        }
+      }
+    } catch (streamErr: any) {
+      const msg = (streamErr?.message ?? String(streamErr)).toLowerCase();
+      // Render drops gzip-compressed responses mid-stream → treat as end of stream
+      if (msg.includes('premature close') || msg.includes('premature_close') || msg.includes('err_stream')) {
+        console.warn('[Agent] OpenAI stream premature close — using accumulated content');
+      } else {
+        throw streamErr;
       }
     }
 
@@ -540,59 +550,65 @@ export async function runProcess(
 
   const mode: 'sequential' | 'parallel' = process.mode ?? 'sequential';
 
-  if (mode === 'sequential') {
-    const outputs: string[] = [];
+  try {
+    if (mode === 'sequential') {
+      const outputs: string[] = [];
 
-    for (let i = 0; i < agentConfigs.length; i++) {
-      const agent       = agentConfigs[i];
-      const stepContext = outputs.map((o, j) => `## Salida del Paso ${j + 1} (${agentConfigs[j].label})\n${o}`).join('\n\n');
+      for (let i = 0; i < agentConfigs.length; i++) {
+        const agent       = agentConfigs[i];
+        const stepContext = outputs.map((o, j) => `## Salida del Paso ${j + 1} (${agentConfigs[j].label})\n${o}`).join('\n\n');
 
-      send({ type: 'agent_start', step: i, total: agentConfigs.length, label: agent.label, model: agent.model });
+        send({ type: 'agent_start', step: i, total: agentConfigs.length, label: agent.label, model: agent.model });
 
-      let agentOutput = '';
-      for await (const ev of runAgentStep(agent, input, stepContext, tokens, userId, ragContext, processInstructions)) {
-        if (ev.type === 'delta') {
-          send({ type: 'delta', step: i, content: ev.content });
-        } else if (ev.type === 'tool_call') {
-          send({ type: 'tool_call', step: i, tool: ev.tool, label: ev.label });
-        } else if (ev.type === 'tool_result') {
-          send({ type: 'tool_result', step: i, tool: ev.tool, ok: ev.ok, preview: ev.preview });
-        } else if (ev.type === 'agent_output') {
-          agentOutput = ev.output;
+        let agentOutput = '';
+        for await (const ev of runAgentStep(agent, input, stepContext, tokens, userId, ragContext, processInstructions)) {
+          if (ev.type === 'delta') {
+            send({ type: 'delta', step: i, content: ev.content });
+          } else if (ev.type === 'tool_call') {
+            send({ type: 'tool_call', step: i, tool: ev.tool, label: ev.label });
+          } else if (ev.type === 'tool_result') {
+            send({ type: 'tool_result', step: i, tool: ev.tool, ok: ev.ok, preview: ev.preview });
+          } else if (ev.type === 'agent_output') {
+            agentOutput = ev.output;
+          }
         }
+
+        outputs.push(agentOutput);
+        send({ type: 'agent_done', step: i, output: agentOutput });
       }
 
-      outputs.push(agentOutput);
-      send({ type: 'agent_done', step: i, output: agentOutput });
+      send({ type: 'process_done', output: outputs[outputs.length - 1] ?? '' });
+
+    } else {
+      const results: string[] = new Array(agentConfigs.length).fill('');
+
+      await Promise.all(agentConfigs.map(async (agent, i) => {
+        send({ type: 'agent_start', step: i, total: agentConfigs.length, label: agent.label, model: agent.model });
+
+        for await (const ev of runAgentStep(agent, input, '', tokens, userId, ragContext, processInstructions)) {
+          if (ev.type === 'delta') {
+            send({ type: 'delta', step: i, content: ev.content });
+          } else if (ev.type === 'tool_call') {
+            send({ type: 'tool_call', step: i, tool: ev.tool, label: ev.label });
+          } else if (ev.type === 'tool_result') {
+            send({ type: 'tool_result', step: i, tool: ev.tool, ok: ev.ok, preview: ev.preview });
+          } else if (ev.type === 'agent_output') {
+            results[i] = ev.output;
+          }
+        }
+
+        send({ type: 'agent_done', step: i, output: results[i] });
+      }));
+
+      const combined = agentConfigs
+        .map((a, i) => `## ${a.label}\n${results[i]}`)
+        .join('\n\n---\n\n');
+
+      send({ type: 'process_done', output: combined });
     }
-
-    send({ type: 'process_done', output: outputs[outputs.length - 1] ?? '' });
-
-  } else {
-    const results: string[] = new Array(agentConfigs.length).fill('');
-
-    await Promise.all(agentConfigs.map(async (agent, i) => {
-      send({ type: 'agent_start', step: i, total: agentConfigs.length, label: agent.label, model: agent.model });
-
-      for await (const ev of runAgentStep(agent, input, '', tokens, userId, ragContext, processInstructions)) {
-        if (ev.type === 'delta') {
-          send({ type: 'delta', step: i, content: ev.content });
-        } else if (ev.type === 'tool_call') {
-          send({ type: 'tool_call', step: i, tool: ev.tool, label: ev.label });
-        } else if (ev.type === 'tool_result') {
-          send({ type: 'tool_result', step: i, tool: ev.tool, ok: ev.ok, preview: ev.preview });
-        } else if (ev.type === 'agent_output') {
-          results[i] = ev.output;
-        }
-      }
-
-      send({ type: 'agent_done', step: i, output: results[i] });
-    }));
-
-    const combined = agentConfigs
-      .map((a, i) => `## ${a.label}\n${results[i]}`)
-      .join('\n\n---\n\n');
-
-    send({ type: 'process_done', output: combined });
+  } catch (err: any) {
+    const msg = err?.message ?? String(err);
+    console.error('[Process] runProcess error:', msg);
+    send({ type: 'error', message: `Error en el proceso: ${msg.slice(0, 200)}` });
   }
 }

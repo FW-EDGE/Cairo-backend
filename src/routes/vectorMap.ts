@@ -73,8 +73,9 @@ router.get('/api/vector-map', requireUser, async (req: Request, res: Response) =
       res.json({ points: [], page, pageSize, totalPages: 0, total: 0, computing: true });
     }
   } catch (err) {
-    console.error('[VectorMap] Error:', err);
-    res.status(500).json({ error: 'Failed to compute vector map' });
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[VectorMap] Error:', msg, err instanceof Error ? err.stack?.slice(0, 500) : '');
+    res.status(500).json({ error: 'Failed to compute vector map', detail: msg });
   }
 });
 

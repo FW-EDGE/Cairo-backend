@@ -226,9 +226,10 @@ async function mcpRequest(accessToken: string, method: string, params: any): Pro
   const res = await fetch(MCP_BASE, {
     method:  'POST',
     headers: {
-      'Content-Type':  'application/json',
-      'Authorization': `Bearer ${accessToken}`,
-      'Accept':        'application/json, text/event-stream',
+      'Content-Type':    'application/json',
+      'Authorization':   `Bearer ${accessToken}`,
+      'Accept':          'application/json, text/event-stream',
+      'Accept-Encoding': 'identity', // prevent gzip on Render
     },
     body,
     signal: AbortSignal.timeout(30_000),
